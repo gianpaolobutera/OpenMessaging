@@ -157,6 +157,16 @@ async function handleGenesysWebhook(request, env) {
 }
 
 async function handleDebugWebhook(env) {
+  if (!env.MESSAGES) {
+    return new Response(JSON.stringify({
+      uiVersion: UI_VERSION,
+      error: 'Missing KV binding: MESSAGES'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
   const orphan = await env.MESSAGES.get('__orphanWebhook');
   const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
   const lastMessages = lastVisitorId ? await env.MESSAGES.get(lastVisitorId) : null;
