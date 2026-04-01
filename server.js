@@ -19,6 +19,17 @@ const GENESYS_CLIENT_ID = process.env.GENESYS_CLIENT_ID || '<YOUR_CLIENT_ID>'; /
 const GENESYS_CLIENT_SECRET = process.env.GENESYS_CLIENT_SECRET || '<YOUR_CLIENT_SECRET>'; // set in .env
 const INTEGRATION_ID = process.env.INTEGRATION_ID || '<YOUR_INTEGRATION_ID>'; // set in .env
 
+function assertLocalConfig() {
+    const missing = [];
+    if (!process.env.GENESYS_CLIENT_ID) missing.push('GENESYS_CLIENT_ID');
+    if (!process.env.GENESYS_CLIENT_SECRET) missing.push('GENESYS_CLIENT_SECRET');
+    if (!process.env.INTEGRATION_ID) missing.push('INTEGRATION_ID');
+
+    if (missing.length > 0) {
+        throw new Error(`Missing local .env values: ${missing.join(', ')}`);
+    }
+}
+
 // Get a client credential token from Genesys Cloud (non-user context)
 async function getAccessToken() {
     // Genesys login endpoint is in the same region; for api URL like https://api.euc2.pure.cloud -> login url is https://login.euc2.pure.cloud
@@ -106,4 +117,10 @@ app.post('/genesys-webhook', (req, res) => {
     res.sendStatus(200);
 });
 
-server.listen(3000, () => console.log('Demo running on http://localhost:3000'));
+try {
+    assertLocalConfig();
+    server.listen(3000, () => console.log('Demo running on http://localhost:3000 (mode: local-node/.env)'));
+} catch (err) {
+    console.error('Startup configuration error:', err.message);
+    process.exit(1);
+}

@@ -1,12 +1,17 @@
-// Secrets bound in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
-// KV namespace bound as MESSAGES in Cloudflare dashboard
+// Cloud mode only: Worker uses Cloudflare bindings (not local .env file).
+// Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
+// KV binding in Cloudflare dashboard: MESSAGES
 
 const GENESYS_API_URL = 'https://api.euc2.pure.cloud';
-const UI_VERSION = '2026-04-01.2';
+const UI_VERSION = '2026-04-01.3';
 
-async function getAccessToken() {
+async function getAccessToken(env) {
+  if (!env.GENESYS_CLIENT_ID || !env.GENESYS_CLIENT_SECRET) {
+    throw new Error('Missing Worker secrets: GENESYS_CLIENT_ID or GENESYS_CLIENT_SECRET');
+  }
+
     const tokenUrl = 'https://login.euc2.pure.cloud/oauth/token';
-    const auth = btoa(`${GENESYS_CLIENT_ID}:${GENESYS_CLIENT_SECRET}`);
+  const auth = btoa(`${env.GENESYS_CLIENT_ID}:${env.GENESYS_CLIENT_SECRET}`);
     const response = await fetch(tokenUrl, {
         method: 'POST',
         headers: {
@@ -23,7 +28,7 @@ async function getAccessToken() {
     return data.access_token;
 }
 
-async function handleSendToGenesys(request) {
+async function handleSendToGenesys(request, env) {
     try {
     const rawBody = await request.text();
     let body;
@@ -40,7 +45,11 @@ async function handleSendToGenesys(request) {
       return new Response('Missing required fields: text, visitorId', { status: 400 });
     }
 
-        const token = await getAccessToken();
+        if (!env.INTEGRATION_ID) {
+          return new Response('Missing Worker secret: INTEGRATION_ID', { status: 500 });
+        }
+
+        const token = await getAccessToken(env);
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
 
@@ -54,7 +63,7 @@ async function handleSendToGenesys(request) {
             text
         };
 
-        const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/message`;
+        const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
         const genesysResponse = await fetch(endpoint, {
             method: 'POST',
             headers: {
@@ -73,7 +82,7 @@ async function handleSendToGenesys(request) {
     }
 }
 
-async function handleGenesysWebhook(request) {
+async function handleGenesysWebhook(request, env) {
     try {
         const body = await request.json();
         console.log('webhook received:', JSON.stringify(body));
@@ -83,10 +92,14 @@ async function handleGenesysWebhook(request) {
         const visitorId = body.channel?.from?.id || body.event?.channel?.from?.id || 'unknown';
 
         if (direction === 'Outbound' && text) {
-            const existing = await MESSAGES.get(visitorId);
+            if (!env.MESSAGES) {
+              return new Response('Missing KV binding: MESSAGES', { status: 500 });
+            }
+
+            const existing = await env.MESSAGES.get(visitorId);
             const msgs = existing ? JSON.parse(existing) : [];
             msgs.push({ text, timestamp: new Date().toISOString() });
-            await MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+            await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
         }
 
         return new Response('OK', { status: 200 });
@@ -96,14 +109,15 @@ async function handleGenesysWebhook(request) {
     }
 }
 
-async function handleGetMessages(request) {
+async function handleGetMessages(request, env) {
     const url = new URL(request.url);
     const visitorId = url.searchParams.get('visitorId');
     const after = parseInt(url.searchParams.get('after') || '0');
 
     if (!visitorId) return new Response('Missing visitorId', { status: 400 });
+  if (!env.MESSAGES) return new Response('Missing KV binding: MESSAGES', { status: 500 });
 
-    const existing = await MESSAGES.get(visitorId);
+  const existing = await env.MESSAGES.get(visitorId);
     const msgs = existing ? JSON.parse(existing) : [];
     const newMsgs = msgs.slice(after);
 
@@ -306,14 +320,14 @@ const PAGE_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-async function handleRequest(request) {
+async function handleRequest(request, env) {
     const url = new URL(request.url);
     const method = request.method;
     const pathname = url.pathname;
 
-    if (method === 'POST' && pathname === '/send-to-genesys') return handleSendToGenesys(request);
-    if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request);
-    if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request);
+    if (method === 'POST' && pathname === '/send-to-genesys') return handleSendToGenesys(request, env);
+    if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request, env);
+    if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request, env);
     if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return new Response(PAGE_HTML, {
         headers: {
@@ -326,6 +340,8 @@ async function handleRequest(request) {
     return new Response('Not Found', { status: 404 });
 }
 
-addEventListener('fetch', event => {
-    event.respondWith(handleRequest(event.request));
-});
+export default {
+  async fetch(request, env) {
+    return handleRequest(request, env);
+  }
+};
