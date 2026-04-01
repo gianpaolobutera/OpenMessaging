@@ -1,31 +1,20 @@
-const GENESYS_REGION = 'euc2'; // Set in Cloudflare dashboard
-const GENESYS_API_URL = `https://api.${GENESYS_REGION}.pure.cloud`;
-// Secrets: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID set in Cloudflare dashboard
+// Secrets bound in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
+// KV namespace bound as MESSAGES in Cloudflare dashboard
+
+const GENESYS_API_URL = 'https://api.euc2.pure.cloud';
 
 async function getAccessToken() {
-    const loginBase = GENESYS_API_URL.replace('api.', 'login.');
-    const tokenUrl = `${loginBase.replace(/\/+$/, '')}/oauth/token`;
-
-    const params = new URLSearchParams({
-        grant_type: 'client_credentials',
-        scope: 'conversation:messages:create integration:openMessaging'
-    });
-
+    const tokenUrl = 'https://login.euc2.pure.cloud/oauth/token';
     const auth = btoa(`${GENESYS_CLIENT_ID}:${GENESYS_CLIENT_SECRET}`);
-
     const response = await fetch(tokenUrl, {
         method: 'POST',
         headers: {
             'Authorization': `Basic ${auth}`,
             'Content-Type': 'application/x-www-form-urlencoded'
         },
-        body: params
+        body: new URLSearchParams({ grant_type: 'client_credentials' })
     });
-
-    if (!response.ok) {
-        throw new Error(`Token acquisition failed: ${response.status}`);
-    }
-
+    if (!response.ok) throw new Error(`Token failed: ${response.status}`);
     const data = await response.json();
     return data.access_token;
 }
@@ -34,7 +23,6 @@ async function handleSendToGenesys(request) {
     try {
         const body = await request.json();
         const { text, visitorId } = body;
-
         const token = await getAccessToken();
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
@@ -42,37 +30,28 @@ async function handleSendToGenesys(request) {
         const payload = {
             channel: {
                 messageId,
-                from: {
-                    id: visitorId,
-                    idType: 'Opaque',
-                },
-                time: now,
+                from: { id: visitorId, idType: 'Opaque' },
+                time: now
             },
             direction: 'Inbound',
-            text: text,
+            text
         };
-
-        console.log('send-to-genesys payload:', JSON.stringify(payload, null, 2));
 
         const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/message`;
         const genesysResponse = await fetch(endpoint, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify(payload)
         });
 
-        if (genesysResponse.ok) {
-            return new Response('OK', { status: 200 });
-        }
+        if (genesysResponse.ok) return new Response('OK', { status: 200 });
 
         const errorData = await genesysResponse.text();
-        console.warn('Genesys inbound response', genesysResponse.status, errorData);
         return new Response(errorData, { status: genesysResponse.status });
     } catch (err) {
-        console.error('send-to-genesys error', err.message);
         return new Response(err.message, { status: 500 });
     }
 }
@@ -80,8 +59,19 @@ async function handleSendToGenesys(request) {
 async function handleGenesysWebhook(request) {
     try {
         const body = await request.json();
-        console.log('genesys-webhook received event:', JSON.stringify(body));
-        // For demo, just log; in real app, emit to socket or something
+        console.log('webhook received:', JSON.stringify(body));
+
+        const direction = body.direction || body.event?.direction || body.body?.direction;
+        const text = body.text || body.event?.text || body.body?.text;
+        const visitorId = body.channel?.from?.id || body.event?.channel?.from?.id || 'unknown';
+
+        if (direction === 'Outbound' && text) {
+            const existing = await MESSAGES.get(visitorId);
+            const msgs = existing ? JSON.parse(existing) : [];
+            msgs.push({ text, timestamp: new Date().toISOString() });
+            await MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+        }
+
         return new Response('OK', { status: 200 });
     } catch (err) {
         console.error('webhook error', err.message);
@@ -89,53 +79,96 @@ async function handleGenesysWebhook(request) {
     }
 }
 
-async function handleRequest(request) {
+async function handleGetMessages(request) {
     const url = new URL(request.url);
+    const visitorId = url.searchParams.get('visitorId');
+    const after = parseInt(url.searchParams.get('after') || '0');
 
-    if (request.method === 'POST' && url.pathname === '/send-to-genesys') {
-        return await handleSendToGenesys(request);
-    }
+    if (!visitorId) return new Response('Missing visitorId', { status: 400 });
 
-    if (request.method === 'POST' && url.pathname === '/genesys-webhook') {
-        return await handleGenesysWebhook(request);
-    }
+    const existing = await MESSAGES.get(visitorId);
+    const msgs = existing ? JSON.parse(existing) : [];
+    const newMsgs = msgs.slice(after);
 
-    if (url.pathname === '/' || url.pathname === '/index.html') {
-        // Serve index.html
-        const html = `<!DOCTYPE html>
+    return new Response(JSON.stringify({ messages: newMsgs, total: msgs.length }), {
+        headers: { 'Content-Type': 'application/json' }
+    });
+}
+
+const PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Genesys Open Messaging Demo</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 16px; }
+        #chat { height: 360px; border: 1px solid #ccc; border-radius: 8px; overflow-y: scroll; padding: 12px; margin-bottom: 12px; background: #f9f9f9; }
+        #chat p { margin: 6px 0; }
+        .you { color: #1a73e8; }
+        .agent { color: #2d7d32; }
+        #controls { display: flex; gap: 8px; }
+        #msg { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 8px 16px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #1558b0; }
+    </style>
 </head>
 <body>
-    <h1>Genesys Open Messaging Demo</h1>
-    <input type="text" id="message" placeholder="Type your message">
-    <button onclick="sendMessage()">Send</button>
-    <div id="replies"></div>
-
-    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <h2>Genesys Open Messaging Demo</h2>
+    <div id="chat"></div>
+    <div id="controls">
+        <input id="msg" type="text" placeholder="Type a message..." onkeydown="if(event.key==='\''Enter'\'') send()">
+        <button onclick="send()">Send</button>
+    </div>
     <script>
-        const socket = io();
+        const visitorId = '\''visitor-'\'' + Math.floor(Math.random() * 9000 + 1000);
+        let seenCount = 0;
 
-        socket.on('agent-reply', (text) => {
-            document.getElementById('replies').innerHTML += '<p>' + text + '</p>';
-        });
-
-        async function sendMessage() {
-            const text = document.getElementById('message').value;
-            const visitorId = 'visitor-' + Math.floor(Math.random() * 1000);
-            await fetch('/send-to-genesys', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+        async function send() {
+            const input = document.getElementById('\''msg'\'');
+            const text = input.value.trim();
+            if (!text) return;
+            appendMessage('\''You'\'', text, '\''you'\'');
+            input.value = '\''\'';
+            await fetch('\''/send-to-genesys'\'', {
+                method: '\''POST'\'',
+                headers: { '\''Content-Type'\'': '\''application/json'\'' },
                 body: JSON.stringify({ text, visitorId })
             });
         }
+
+        function appendMessage(sender, text, cls) {
+            const chat = document.getElementById('\''chat'\'');
+            chat.innerHTML += '\''<p class="'\'' + cls + '\''"><b>'\'' + sender + '\'':</b> '\'' + text + '\''</p>'\'';
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        async function pollReplies() {
+            try {
+                const res = await fetch('\''/get-messages?visitorId='\'' + visitorId + '\''&after='\'' + seenCount);
+                const data = await res.json();
+                if (data.messages && data.messages.length > 0) {
+                    data.messages.forEach(m => appendMessage('\''Agent'\'', m.text, '\''agent'\''));
+                    seenCount = data.total;
+                }
+            } catch (e) { }
+        }
+
+        setInterval(pollReplies, 2000);
     </script>
 </body>
 </html>`;
-        return new Response(html, { headers: { 'Content-Type': 'text/html' } });
+
+async function handleRequest(request) {
+    const url = new URL(request.url);
+    const method = request.method;
+    const pathname = url.pathname;
+
+    if (method === 'POST' && pathname === '/send-to-genesys') return handleSendToGenesys(request);
+    if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request);
+    if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request);
+    if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
+        return new Response(PAGE_HTML, { headers: { 'Content-Type': 'text/html' } });
     }
 
     return new Response('Not Found', { status: 404 });
