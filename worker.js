@@ -98,64 +98,193 @@ async function handleGetMessages(request) {
 const PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Genesys Open Messaging Demo</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 16px; }
-        #chat { height: 360px; border: 1px solid #ccc; border-radius: 8px; overflow-y: scroll; padding: 12px; margin-bottom: 12px; background: #f9f9f9; }
-        #chat p { margin: 6px 0; }
-        .you { color: #1a73e8; }
-        .agent { color: #2d7d32; }
-        #controls { display: flex; gap: 8px; }
-        #msg { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
-        button { padding: 8px 16px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #1558b0; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support Chat</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+
+  .chat-wrapper { width: 420px; max-width: 100vw; height: 680px; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.18); }
+
+  /* Header */
+  .chat-header { background: linear-gradient(135deg, #0f4c81, #1a73e8); padding: 16px 20px; display: flex; align-items: center; gap: 12px; }
+  .avatar { width: 44px; height: 44px; border-radius: 50%; background: #fff; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
+  .header-info { flex: 1; }
+  .header-name { color: #fff; font-weight: 700; font-size: 16px; }
+  .header-status { color: #b3d4ff; font-size: 12px; display: flex; align-items: center; gap: 5px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; display: inline-block; }
+  .header-close { color: #b3d4ff; cursor: pointer; font-size: 20px; line-height: 1; }
+
+  /* Messages */
+  .chat-messages { flex: 1; overflow-y: auto; padding: 16px; background: #f8f9fb; display: flex; flex-direction: column; gap: 10px; }
+  .chat-messages::-webkit-scrollbar { width: 4px; }
+  .chat-messages::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
+
+  /* Bubbles */
+  .msg-row { display: flex; align-items: flex-end; gap: 8px; }
+  .msg-row.outgoing { flex-direction: row-reverse; }
+  .msg-avatar { width: 30px; height: 30px; border-radius: 50%; background: #1a73e8; color: #fff; display: flex; align-items: center; justify-content: font-size:11px; font-size: 11px; font-weight: 700; flex-shrink: 0; align-items: center; justify-content: center; }
+  .msg-avatar.you-avatar { background: #e8f0fe; color: #1a73e8; }
+  .bubble { max-width: 75%; padding: 10px 14px; border-radius: 18px; font-size: 14px; line-height: 1.45; word-break: break-word; }
+  .incoming .bubble { background: #fff; color: #1a1a1a; border-bottom-left-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .outgoing .bubble { background: #1a73e8; color: #fff; border-bottom-right-radius: 4px; }
+  .bubble-meta { font-size: 11px; margin-top: 4px; opacity: 0.65; }
+  .incoming .bubble-meta { text-align: left; color: #555; }
+  .outgoing .bubble-meta { text-align: right; color: #c8deff; }
+
+  /* System message */
+  .sys-msg { text-align: center; font-size: 12px; color: #999; padding: 4px 0; }
+
+  /* Typing indicator */
+  .typing-row { display: flex; align-items: flex-end; gap: 8px; }
+  .typing-bubble { background: #fff; border-radius: 18px; border-bottom-left-radius: 4px; padding: 10px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; gap: 4px; align-items: center; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #a0a0a0; animation: bounce 1.2s infinite; }
+  .dot:nth-child(2) { animation-delay: 0.2s; }
+  .dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+
+  /* Input area */
+  .chat-footer { background: #fff; padding: 12px 16px; border-top: 1px solid #e8e8e8; display: flex; align-items: flex-end; gap: 10px; }
+  #msg { flex: 1; border: 1.5px solid #e0e0e0; border-radius: 24px; padding: 10px 16px; font-size: 14px; resize: none; outline: none; max-height: 100px; line-height: 1.4; transition: border-color 0.2s; font-family: inherit; }
+  #msg:focus { border-color: #1a73e8; }
+  #sendBtn { width: 42px; height: 42px; border-radius: 50%; background: #1a73e8; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 0.2s; }
+  #sendBtn:hover { background: #1558b0; }
+  #sendBtn:disabled { background: #c5d9f7; cursor: default; }
+  #sendBtn svg { width: 20px; height: 20px; fill: #fff; }
+
+  /* Status bar */
+  .status-bar { background: #fff; padding: 6px 16px; border-top: 1px solid #f0f0f0; font-size: 11px; color: #aaa; text-align: center; }
+</style>
 </head>
 <body>
-    <h2>Genesys Open Messaging Demo</h2>
-    <div id="chat"></div>
-    <div id="controls">
-        <input id="msg" type="text" placeholder="Type a message..." onkeydown="if(event.key==='\''Enter'\'') send()">
-        <button onclick="send()">Send</button>
+<div class="chat-wrapper">
+  <div class="chat-header">
+    <div class="avatar">💬</div>
+    <div class="header-info">
+      <div class="header-name">Support Agent</div>
+      <div class="header-status"><span class="status-dot"></span> Online · Genesys Cloud</div>
     </div>
-    <script>
-        const visitorId = '\''visitor-'\'' + Math.floor(Math.random() * 9000 + 1000);
-        let seenCount = 0;
+  </div>
 
-        async function send() {
-            const input = document.getElementById('\''msg'\'');
-            const text = input.value.trim();
-            if (!text) return;
-            appendMessage('\''You'\'', text, '\''you'\'');
-            input.value = '\''\'';
-            await fetch('\''/send-to-genesys'\'', {
-                method: '\''POST'\'',
-                headers: { '\''Content-Type'\'': '\''application/json'\'' },
-                body: JSON.stringify({ text, visitorId })
-            });
-        }
+  <div class="chat-messages" id="chat">
+    <div class="sys-msg">Chat started — we'll respond shortly</div>
+  </div>
 
-        function appendMessage(sender, text, cls) {
-            const chat = document.getElementById('\''chat'\'');
-            chat.innerHTML += '\''<p class="'\'' + cls + '\''"><b>'\'' + sender + '\'':</b> '\'' + text + '\''</p>'\'';
-            chat.scrollTop = chat.scrollHeight;
-        }
+  <div class="chat-footer">
+    <textarea id="msg" rows="1" placeholder="Type a message…" oninput="autoResize(this)" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();send();}"></textarea>
+    <button id="sendBtn" onclick="send()" title="Send">
+      <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+    </button>
+  </div>
+  <div class="status-bar" id="statusBar">Connecting…</div>
+</div>
 
-        async function pollReplies() {
-            try {
-                const res = await fetch('\''/get-messages?visitorId='\'' + visitorId + '\''&after='\'' + seenCount);
-                const data = await res.json();
-                if (data.messages && data.messages.length > 0) {
-                    data.messages.forEach(m => appendMessage('\''Agent'\'', m.text, '\''agent'\''));
-                    seenCount = data.total;
-                }
-            } catch (e) { }
-        }
+<script>
+  const visitorId = 'visitor-' + Math.random().toString(36).slice(2, 9);
+  let seenCount = 0;
+  let typingTimer = null;
+  let connected = false;
 
-        setInterval(pollReplies, 2000);
-    </script>
+  function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+  }
+
+  function formatTime(iso) {
+    const d = iso ? new Date(iso) : new Date();
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function appendBubble(sender, text, type, timestamp) {
+    const chat = document.getElementById('chat');
+    const isOut = type === 'outgoing';
+    const row = document.createElement('div');
+    row.className = 'msg-row ' + type;
+    const avatarLabel = isOut ? 'Me' : 'AG';
+    const avatarClass = isOut ? 'you-avatar' : '';
+    row.innerHTML =
+      '<div class="msg-avatar ' + avatarClass + '">' + avatarLabel + '</div>' +
+      '<div>' +
+        '<div class="bubble">' + escapeHtml(text) + '</div>' +
+        '<div class="bubble-meta">' + (isOut ? 'You' : 'Agent') + ' · ' + formatTime(timestamp) + '</div>' +
+      '</div>';
+    chat.appendChild(row);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function showTyping() {
+    removeTyping();
+    const chat = document.getElementById('chat');
+    const row = document.createElement('div');
+    row.className = 'typing-row'; row.id = 'typingIndicator';
+    row.innerHTML = '<div class="msg-avatar">AG</div><div class="typing-bubble"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+    chat.appendChild(row);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function removeTyping() {
+    const el = document.getElementById('typingIndicator');
+    if (el) el.remove();
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function setStatus(text) {
+    document.getElementById('statusBar').textContent = text;
+  }
+
+  async function send() {
+    const input = document.getElementById('msg');
+    const btn = document.getElementById('sendBtn');
+    const text = input.value.trim();
+    if (!text) return;
+
+    appendBubble('You', text, 'outgoing');
+    input.value = ''; input.style.height = 'auto';
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/send-to-genesys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, visitorId })
+      });
+      if (res.ok) {
+        setStatus('Message sent · Waiting for agent reply…');
+        showTyping();
+        typingTimer = setTimeout(removeTyping, 15000);
+      } else {
+        setStatus('Send failed (' + res.status + ') — try again');
+      }
+    } catch (e) {
+      setStatus('Network error — check connection');
+    }
+    btn.disabled = false;
+    input.focus();
+  }
+
+  async function pollReplies() {
+    try {
+      const res = await fetch('/get-messages?visitorId=' + visitorId + '&after=' + seenCount);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!connected) { connected = true; setStatus('Connected · Visitor ID: ' + visitorId); }
+      if (data.messages && data.messages.length > 0) {
+        clearTimeout(typingTimer);
+        removeTyping();
+        data.messages.forEach(m => appendBubble('Agent', m.text, 'incoming', m.timestamp));
+        seenCount = data.total;
+        setStatus('Agent replied · ' + formatTime());
+      }
+    } catch (e) { setStatus('Polling error — retrying…'); }
+  }
+
+  setInterval(pollReplies, 2000);
+  setTimeout(() => { if (!connected) setStatus('Ready · Visitor ID: ' + visitorId); }, 2000);
+</script>
 </body>
 </html>`;
 
