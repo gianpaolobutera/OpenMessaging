@@ -2,10 +2,6 @@ name = "openmess"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
-# KV namespace binding - create in Cloudflare dashboard: Workers > KV > Create "MESSAGES"
-# then bind: Workers > openmess > Settings > Variables > KV Bindings > variable=MESSAGES
-[[kv_namespaces]]
-binding = "MESSAGES"
-id = "YOUR_KV_NAMESPACE_ID"
-
-# Secrets set via Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
+# Bindings and secrets are managed in Cloudflare Dashboard for this environment:
+# - KV binding: MESSAGES
+# - Secrets: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
