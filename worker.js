@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-01.4';
+const UI_VERSION = '2026-04-01.5';
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -380,6 +380,12 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   /* Status bar */
   .status-bar { background: #fff; padding: 6px 16px; border-top: 1px solid #f0f0f0; font-size: 11px; color: #aaa; text-align: center; }
+  .debug-row { background: #fff; border-top: 1px solid #f3f3f3; padding: 6px 12px; display: flex; justify-content: center; }
+  .debug-pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #e4e8f2; border-radius: 999px; padding: 4px 10px; font-size: 11px; color: #556; background: #f7f9ff; }
+  .dot-mini { width: 8px; height: 8px; border-radius: 50%; background: #9aa3b2; }
+  .dot-mini.agent { background: #20b26b; }
+  .dot-mini.customer { background: #1a73e8; }
+  .dot-mini.off { background: #9aa3b2; }
 </style>
 </head>
 <body>
@@ -403,6 +409,9 @@ const PAGE_HTML = `<!DOCTYPE html>
     </button>
   </div>
   <div class="status-bar" id="statusBar">Connecting… (UI ${UI_VERSION})</div>
+  <div class="debug-row">
+    <div class="debug-pill" id="typingDebug"><span class="dot-mini off" id="typingDot"></span><span id="typingText">typing: off</span></div>
+  </div>
 </div>
 
 <script>
@@ -462,6 +471,14 @@ const PAGE_HTML = `<!DOCTYPE html>
     document.getElementById('statusBar').textContent = text;
   }
 
+  function setTypingDebug(isTyping, source) {
+    const dot = document.getElementById('typingDot');
+    const text = document.getElementById('typingText');
+    const src = source || 'none';
+    dot.className = 'dot-mini ' + (isTyping ? (src === 'agent' ? 'agent' : 'customer') : 'off');
+    text.textContent = 'typing: ' + (isTyping ? 'on' : 'off') + ' (' + src + ')';
+  }
+
   async function send() {
     const input = document.getElementById('msg');
     const btn = document.getElementById('sendBtn');
@@ -519,8 +536,10 @@ const PAGE_HTML = `<!DOCTYPE html>
       if (!connected) { connected = true; setStatus('Connected · Visitor ID: ' + visitorId + ' · UI ${UI_VERSION}'); }
       if (data.typing && data.typing.isTyping && data.typing.source === 'agent') {
         showTyping();
+        setTypingDebug(true, data.typing.source);
       } else {
         removeTyping();
+        setTypingDebug(Boolean(data.typing && data.typing.isTyping), data.typing ? data.typing.source : 'none');
       }
       if (data.messages && data.messages.length > 0) {
         removeTyping();
