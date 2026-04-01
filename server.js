@@ -1,0 +1,109 @@
+require('dotenv').config();
+const crypto = require('crypto');
+const express = require('express');
+const http = require('http');
+const axios = require('axios');
+const { Server } = require('socket.io');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+app.use(express.json());
+app.use(express.static('public')); // Serves your HTML/JS files
+
+// Set via environment for security (do not commit secrets)
+const GENESYS_REGION = process.env.GENESYS_REGION || 'euc2';
+const GENESYS_API_URL = process.env.GENESYS_API_URL || `https://api.${GENESYS_REGION}.pure.cloud`;
+const GENESYS_CLIENT_ID = process.env.GENESYS_CLIENT_ID || '<YOUR_CLIENT_ID>'; // set in .env
+const GENESYS_CLIENT_SECRET = process.env.GENESYS_CLIENT_SECRET || '<YOUR_CLIENT_SECRET>'; // set in .env
+const INTEGRATION_ID = process.env.INTEGRATION_ID || '<YOUR_INTEGRATION_ID>'; // set in .env
+
+// Get a client credential token from Genesys Cloud (non-user context)
+async function getAccessToken() {
+    // Genesys login endpoint is in the same region; for api URL like https://api.euc2.pure.cloud -> login url is https://login.euc2.pure.cloud
+    const loginBase = process.env.GENESYS_AUTH_URL || GENESYS_API_URL.replace('api.', 'login.');
+    const tokenUrl = `${loginBase.replace(/\/+$/, '')}/oauth/token`;
+
+    try {
+        const result = await axios.post(tokenUrl, new URLSearchParams({
+            grant_type: 'client_credentials',
+            scope: 'conversation:messages:create integration:openMessaging'
+        }), {
+            auth: {
+                username: GENESYS_CLIENT_ID,
+                password: GENESYS_CLIENT_SECRET
+            },
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+        });
+        return result.data.access_token;
+    } catch (e) {
+        console.error('Token acquisition failed', e.response ? e.response.data : e.message);
+        throw new Error('Failed to get Genesys client credentials token');
+    }
+}
+
+// 1. INBOUND: Web Page -> Middleware -> Genesys
+app.post('/send-to-genesys', async (req, res) => {
+    const { text, visitorId } = req.body;
+    try {
+        const token = await getAccessToken();
+        const now = new Date().toISOString();
+        const messageId = `${visitorId}-${crypto.randomUUID()}`;
+
+        const payload = {
+            channel: {
+                messageId,
+                from: {
+                    id: visitorId,
+                    idType: 'Opaque',
+                },
+                time: now,
+            },
+            direction: 'Inbound',
+            text: text,
+        };
+
+        console.log('send-to-genesys payload:', JSON.stringify(payload, null, 2));
+
+        const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/message`;
+        const response = await axios.post(endpoint, payload, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+            },
+        });
+
+        if (response.status === 200 || response.status === 201) {
+            return res.sendStatus(200);
+        }
+
+        console.warn('Genesys inbound response', response.status, response.data);
+        return res.status(response.status).json(response.data);
+    } catch (err) {
+        console.error('send-to-genesys error', err.response ? err.response.data : err.message);
+        const status = err.response?.status || 500;
+        const message = err.response?.data || err.message;
+        res.status(status).send(message);
+    }
+});
+
+// 2. OUTBOUND: Genesys Webhook -> Middleware -> Web Page (via Socket.io)
+app.post('/genesys-webhook', (req, res) => {
+    const outboundMessage = req.body;
+    console.log('genesys-webhook received event:', JSON.stringify(outboundMessage));
+
+    // Open Messaging callback may nest message payloads and direction fields
+    const direction = outboundMessage.direction || outboundMessage.event?.direction || outboundMessage.body?.direction;
+    const text = outboundMessage.text || outboundMessage.event?.text || outboundMessage.body?.text;
+
+    if (direction === 'Outbound' && text) {
+        io.emit('agent-reply', text);
+    }
+
+    res.sendStatus(200);
+});
+
+server.listen(3000, () => console.log('Demo running on http://localhost:3000'));

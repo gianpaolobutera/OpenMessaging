@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <div id="chat" style="height:300px; border:1px solid #ccc; overflow-y:scroll;"></div>
+    <input id="msg" type="text" placeholder="Type a message...">
+    <button onclick="send()">Send</button>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const visitorId = "visitor-" + Math.floor(Math.random() * 1000);
+
+        // Receive from Agent
+        socket.on('agent-reply', (text) => {
+            document.getElementById('chat').innerHTML += `<p><b>Agent:</b> ${text}</p>`;
+        });
+
+        // Send to Middleware
+        async function send() {
+            const text = document.getElementById('msg').value;
+            document.getElementById('chat').innerHTML += `<p><b>You:</b> ${text}</p>`;
+            await fetch('/send-to-genesys', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ text, visitorId })
+            });
+            document.getElementById('msg').value = '';
+        }
+    </script>
+</body>
+</html>
