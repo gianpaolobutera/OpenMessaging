@@ -2,6 +2,7 @@
 // KV namespace bound as MESSAGES in Cloudflare dashboard
 
 const GENESYS_API_URL = 'https://api.euc2.pure.cloud';
+const UI_VERSION = '2026-04-01.2';
 
 async function getAccessToken() {
     const tokenUrl = 'https://login.euc2.pure.cloud/oauth/token';
@@ -193,7 +194,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
     </button>
   </div>
-  <div class="status-bar" id="statusBar">Connecting…</div>
+  <div class="status-bar" id="statusBar">Connecting… (UI ${UI_VERSION})</div>
 </div>
 
 <script>
@@ -288,7 +289,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       const res = await fetch('/get-messages?visitorId=' + visitorId + '&after=' + seenCount);
       if (!res.ok) return;
       const data = await res.json();
-      if (!connected) { connected = true; setStatus('Connected · Visitor ID: ' + visitorId); }
+      if (!connected) { connected = true; setStatus('Connected · Visitor ID: ' + visitorId + ' · UI ${UI_VERSION}'); }
       if (data.messages && data.messages.length > 0) {
         clearTimeout(typingTimer);
         removeTyping();
@@ -300,7 +301,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   setInterval(pollReplies, 2000);
-  setTimeout(() => { if (!connected) setStatus('Ready · Visitor ID: ' + visitorId); }, 2000);
+  setTimeout(() => { if (!connected) setStatus('Ready · Visitor ID: ' + visitorId + ' · UI ${UI_VERSION}'); }, 2000);
 </script>
 </body>
 </html>`;
@@ -314,7 +315,12 @@ async function handleRequest(request) {
     if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request);
     if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request);
     if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-        return new Response(PAGE_HTML, { headers: { 'Content-Type': 'text/html' } });
+      return new Response(PAGE_HTML, {
+        headers: {
+          'Content-Type': 'text/html; charset=UTF-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
+        }
+      });
     }
 
     return new Response('Not Found', { status: 404 });
