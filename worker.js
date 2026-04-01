@@ -8,6 +8,36 @@ function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
 }
 
+function collectCandidateVisitorIds(payload) {
+  const candidates = new Set();
+  const add = (v) => {
+    if (typeof v === 'string' && v.trim()) candidates.add(v.trim());
+  };
+
+  add(payload?.channel?.from?.id);
+  add(payload?.channel?.to?.id);
+  add(payload?.event?.channel?.from?.id);
+  add(payload?.event?.channel?.to?.id);
+  add(payload?.body?.channel?.from?.id);
+  add(payload?.body?.channel?.to?.id);
+  add(payload?.from?.id);
+  add(payload?.to?.id);
+  add(payload?.sender?.id);
+  add(payload?.recipient?.id);
+  add(payload?.metadata?.visitorId);
+  add(payload?.event?.metadata?.visitorId);
+  add(payload?.body?.metadata?.visitorId);
+
+  return Array.from(candidates);
+}
+
+async function appendReply(env, visitorId, text) {
+  const existing = await env.MESSAGES.get(visitorId);
+  const msgs = existing ? JSON.parse(existing) : [];
+  msgs.push({ text, timestamp: new Date().toISOString() });
+  await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+}
+
 async function getAccessToken(env) {
   if (!env.GENESYS_CLIENT_ID || !env.GENESYS_CLIENT_SECRET) {
     throw new Error('Missing Worker secrets: GENESYS_CLIENT_ID or GENESYS_CLIENT_SECRET');
@@ -54,6 +84,7 @@ async function handleSendToGenesys(request, env) {
         }
 
         const token = await getAccessToken(env);
+        await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
 
@@ -93,17 +124,29 @@ async function handleGenesysWebhook(request, env) {
 
         const direction = body.direction || body.event?.direction || body.body?.direction;
         const text = body.text || body.event?.text || body.body?.text;
-        const visitorId = body.channel?.from?.id || body.event?.channel?.from?.id || 'unknown';
 
         if (direction === 'Outbound' && text) {
             if (!env.MESSAGES) {
               return new Response('Missing KV binding: MESSAGES', { status: 500 });
             }
 
-            const existing = await env.MESSAGES.get(visitorId);
-            const msgs = existing ? JSON.parse(existing) : [];
-            msgs.push({ text, timestamp: new Date().toISOString() });
-            await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+            const candidates = collectCandidateVisitorIds(body);
+            if (candidates.length === 0) {
+              const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+              if (lastVisitorId) candidates.push(lastVisitorId);
+            }
+
+            if (candidates.length === 0) {
+              await env.MESSAGES.put('__orphanWebhook', JSON.stringify({
+                at: new Date().toISOString(),
+                reason: 'no-visitor-id-found',
+                payload: body
+              }), { expirationTtl: 3600 });
+            } else {
+              for (const visitorId of candidates) {
+                await appendReply(env, visitorId, text);
+              }
+            }
         }
 
         return new Response('OK', { status: 200 });
@@ -111,6 +154,21 @@ async function handleGenesysWebhook(request, env) {
         console.error('webhook error', err.message);
         return new Response(err.message, { status: 500 });
     }
+}
+
+async function handleDebugWebhook(env) {
+  const orphan = await env.MESSAGES.get('__orphanWebhook');
+  const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+  const lastMessages = lastVisitorId ? await env.MESSAGES.get(lastVisitorId) : null;
+
+  return new Response(JSON.stringify({
+    uiVersion: UI_VERSION,
+    lastVisitorId: lastVisitorId || null,
+    hasLastMessages: Boolean(lastMessages),
+    orphanWebhook: orphan ? JSON.parse(orphan) : null
+  }), {
+    headers: { 'Content-Type': 'application/json' }
+  });
 }
 
 async function handleGetMessages(request, env) {
@@ -357,6 +415,7 @@ async function handleRequest(request, env) {
     if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request, env);
     if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request, env);
     if (method === 'GET' && pathname === '/health-config') return handleHealthConfig(env);
+    if (method === 'GET' && pathname === '/debug-webhook') return handleDebugWebhook(env);
     if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return new Response(PAGE_HTML, {
         headers: {
