@@ -2,6 +2,15 @@ name = "openmess"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
-# Bindings and secrets are managed in Cloudflare Dashboard for this environment:
+# Versioned non-secret vars (persist via Git + redeploy)
+[vars]
+GENESYS_REGION = "euc2"
+GENESYS_API_URL = "https://api.euc2.pure.cloud"
+
+# Keep these in Cloudflare Secrets (persist across deploys, never commit values):
+# - GENESYS_CLIENT_ID
+# - GENESYS_CLIENT_SECRET
+# - INTEGRATION_ID
+#
+# Keep this binding configured in Cloudflare Worker settings:
 # - KV binding: MESSAGES
-# - Secrets: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID

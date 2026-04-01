@@ -2,15 +2,19 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const GENESYS_API_URL = 'https://api.euc2.pure.cloud';
 const UI_VERSION = '2026-04-01.3';
+
+function getGenesysApiUrl(env) {
+  return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
+}
 
 async function getAccessToken(env) {
   if (!env.GENESYS_CLIENT_ID || !env.GENESYS_CLIENT_SECRET) {
     throw new Error('Missing Worker secrets: GENESYS_CLIENT_ID or GENESYS_CLIENT_SECRET');
   }
 
-    const tokenUrl = 'https://login.euc2.pure.cloud/oauth/token';
+    const loginUrl = getGenesysApiUrl(env).replace('api.', 'login.');
+    const tokenUrl = `${loginUrl.replace(/\/+$/, '')}/oauth/token`;
   const auth = btoa(`${env.GENESYS_CLIENT_ID}:${env.GENESYS_CLIENT_SECRET}`);
     const response = await fetch(tokenUrl, {
         method: 'POST',
@@ -63,7 +67,7 @@ async function handleSendToGenesys(request, env) {
             text
         };
 
-        const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
+        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
         const genesysResponse = await fetch(endpoint, {
             method: 'POST',
             headers: {
