@@ -65,12 +65,32 @@ function extractTypingState(payload) {
     payload?.typingState ||
     payload?.event?.typingState ||
     payload?.body?.typingState ||
+    payload?.eventType ||
+    payload?.event?.eventType ||
+    payload?.body?.eventType ||
+    payload?.status ||
+    payload?.event?.status ||
+    payload?.body?.status ||
     null;
 
   if (!raw) return null;
   const normalized = String(raw).toLowerCase();
-  if (['on', 'start', 'started', 'true', 'typing'].includes(normalized)) return true;
-  if (['off', 'stop', 'stopped', 'false', 'idle'].includes(normalized)) return false;
+  if (
+    ['on', 'start', 'started', 'true', 'typing'].includes(normalized) ||
+    normalized.includes('typingstart') ||
+    normalized.includes('typing_started') ||
+    normalized.includes('typing.on')
+  ) {
+    return true;
+  }
+  if (
+    ['off', 'stop', 'stopped', 'false', 'idle'].includes(normalized) ||
+    normalized.includes('typingstop') ||
+    normalized.includes('typing_stopped') ||
+    normalized.includes('typing.off')
+  ) {
+    return false;
+  }
   return null;
 }
 
@@ -208,6 +228,20 @@ async function handleGenesysWebhook(request, env) {
         const direction = body.direction || body.event?.direction || body.body?.direction;
         const text = body.text || body.event?.text || body.body?.text;
         const typingState = extractTypingState(body);
+        const typingRaw =
+          body?.typing?.state ||
+          body?.event?.typing?.state ||
+          body?.body?.typing?.state ||
+          body?.typingState ||
+          body?.event?.typingState ||
+          body?.body?.typingState ||
+          body?.eventType ||
+          body?.event?.eventType ||
+          body?.body?.eventType ||
+          body?.status ||
+          body?.event?.status ||
+          body?.body?.status ||
+          null;
 
         if (direction === 'Outbound' && typingState !== null) {
             const typingCandidates = collectCandidateVisitorIds(body);
@@ -244,6 +278,14 @@ async function handleGenesysWebhook(request, env) {
             }
         }
 
+        await env.MESSAGES.put('__lastWebhookTyping', JSON.stringify({
+          at: new Date().toISOString(),
+          direction,
+          typingRaw,
+          typingState,
+          candidateCount: collectCandidateVisitorIds(body).length
+        }), { expirationTtl: 3600 });
+
         return new Response('OK', { status: 200 });
     } catch (err) {
         console.error('webhook error', err.message);
@@ -266,12 +308,14 @@ async function handleDebugWebhook(env) {
   const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
   const lastMessages = lastVisitorId ? await env.MESSAGES.get(lastVisitorId) : null;
   const typing = lastVisitorId ? await getTypingState(env, lastVisitorId) : { isTyping: false, source: null };
+  const lastWebhookTyping = await env.MESSAGES.get('__lastWebhookTyping');
 
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
     lastVisitorId: lastVisitorId || null,
     hasLastMessages: Boolean(lastMessages),
     typing,
+    lastWebhookTyping: lastWebhookTyping ? JSON.parse(lastWebhookTyping) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
     headers: { 'Content-Type': 'application/json' }
