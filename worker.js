@@ -130,6 +130,30 @@ async function handleGetMessages(request, env) {
     });
 }
 
+async function handleHealthConfig(env) {
+  const hasClientId = Boolean(env.GENESYS_CLIENT_ID);
+  const hasClientSecret = Boolean(env.GENESYS_CLIENT_SECRET);
+  const hasIntegrationId = Boolean(env.INTEGRATION_ID);
+  const hasMessagesKv = Boolean(env.MESSAGES);
+
+  const ok = hasClientId && hasClientSecret && hasIntegrationId && hasMessagesKv;
+
+  return new Response(JSON.stringify({
+    ok,
+    uiVersion: UI_VERSION,
+    config: {
+      genesysApiUrl: getGenesysApiUrl(env),
+      hasClientId,
+      hasClientSecret,
+      hasIntegrationId,
+      hasMessagesKv
+    }
+  }), {
+    status: ok ? 200 : 500,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
 const PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -332,6 +356,7 @@ async function handleRequest(request, env) {
     if (method === 'POST' && pathname === '/send-to-genesys') return handleSendToGenesys(request, env);
     if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request, env);
     if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request, env);
+    if (method === 'GET' && pathname === '/health-config') return handleHealthConfig(env);
     if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return new Response(PAGE_HTML, {
         headers: {
