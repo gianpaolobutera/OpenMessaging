@@ -12,7 +12,10 @@ async function getAccessToken() {
             'Authorization': `Basic ${auth}`,
             'Content-Type': 'application/x-www-form-urlencoded'
         },
-        body: new URLSearchParams({ grant_type: 'client_credentials' })
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          scope: 'conversation:messages:create integration:openMessaging'
+        })
     });
     if (!response.ok) throw new Error(`Token failed: ${response.status}`);
     const data = await response.json();
@@ -21,8 +24,21 @@ async function getAccessToken() {
 
 async function handleSendToGenesys(request) {
     try {
-        const body = await request.json();
+    const rawBody = await request.text();
+    let body;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      // Tolerate payloads wrapped in single quotes from some shell invocations
+      const normalized = rawBody.trim().replace(/^'/, '').replace(/'$/, '');
+      body = JSON.parse(normalized);
+    }
+
         const { text, visitorId } = body;
+    if (!text || !visitorId) {
+      return new Response('Missing required fields: text, visitorId', { status: 400 });
+    }
+
         const token = await getAccessToken();
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
@@ -52,7 +68,7 @@ async function handleSendToGenesys(request) {
         const errorData = await genesysResponse.text();
         return new Response(errorData, { status: genesysResponse.status });
     } catch (err) {
-        return new Response(err.message, { status: 500 });
+      return new Response(`send-to-genesys failed: ${err.message}`, { status: 500 });
     }
 }
 
@@ -257,7 +273,8 @@ const PAGE_HTML = `<!DOCTYPE html>
         showTyping();
         typingTimer = setTimeout(removeTyping, 15000);
       } else {
-        setStatus('Send failed (' + res.status + ') — try again');
+        const reason = await res.text();
+        setStatus('Send failed (' + res.status + '): ' + reason);
       }
     } catch (e) {
       setStatus('Network error — check connection');
