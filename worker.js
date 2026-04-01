@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-01.3';
+const UI_VERSION = '2026-04-01.4';
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -36,6 +36,42 @@ async function appendReply(env, visitorId, text) {
   const msgs = existing ? JSON.parse(existing) : [];
   msgs.push({ text, timestamp: new Date().toISOString() });
   await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+}
+
+async function setTypingState(env, visitorId, isTyping, source) {
+  const payload = {
+    isTyping: Boolean(isTyping),
+    source: source || 'unknown',
+    at: new Date().toISOString()
+  };
+  await env.MESSAGES.put(`__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: 120 });
+}
+
+async function getTypingState(env, visitorId) {
+  const raw = await env.MESSAGES.get(`__typing:${visitorId}`);
+  if (!raw) return { isTyping: false, source: null };
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { isTyping: false, source: null };
+  }
+}
+
+function extractTypingState(payload) {
+  const raw =
+    payload?.typing?.state ||
+    payload?.event?.typing?.state ||
+    payload?.body?.typing?.state ||
+    payload?.typingState ||
+    payload?.event?.typingState ||
+    payload?.body?.typingState ||
+    null;
+
+  if (!raw) return null;
+  const normalized = String(raw).toLowerCase();
+  if (['on', 'start', 'started', 'true', 'typing'].includes(normalized)) return true;
+  if (['off', 'stop', 'stopped', 'false', 'idle'].includes(normalized)) return false;
+  return null;
 }
 
 async function getAccessToken(env) {
@@ -85,6 +121,7 @@ async function handleSendToGenesys(request, env) {
 
         const token = await getAccessToken(env);
         await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
+        await setTypingState(env, visitorId, false, 'customer');
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
 
@@ -117,6 +154,52 @@ async function handleSendToGenesys(request, env) {
     }
 }
 
+async function handleSendTypingToGenesys(request, env) {
+    try {
+      const body = await request.json();
+      const { visitorId, isTyping } = body || {};
+
+      if (!visitorId || typeof isTyping !== 'boolean') {
+        return new Response('Missing required fields: visitorId, isTyping(boolean)', { status: 400 });
+      }
+
+      if (!env.MESSAGES) return new Response('Missing KV binding: MESSAGES', { status: 500 });
+      await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
+      await setTypingState(env, visitorId, isTyping, 'customer');
+
+      // Best effort pass-through to Genesys; ignore if integration does not support typing events.
+      try {
+        const token = await getAccessToken(env);
+        const now = new Date().toISOString();
+        const messageId = `${visitorId}-${crypto.randomUUID()}`;
+        const payload = {
+          channel: {
+            messageId,
+            from: { id: visitorId, idType: 'Opaque' },
+            time: now
+          },
+          direction: 'Inbound',
+          eventType: 'Typing',
+          typing: { state: isTyping ? 'On' : 'Off' }
+        };
+        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
+        await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+      } catch {
+      }
+
+      return new Response('OK', { status: 200 });
+    } catch (err) {
+      return new Response(`send-typing failed: ${err.message}`, { status: 500 });
+    }
+}
+
 async function handleGenesysWebhook(request, env) {
     try {
         const body = await request.json();
@@ -124,6 +207,18 @@ async function handleGenesysWebhook(request, env) {
 
         const direction = body.direction || body.event?.direction || body.body?.direction;
         const text = body.text || body.event?.text || body.body?.text;
+        const typingState = extractTypingState(body);
+
+        if (direction === 'Outbound' && typingState !== null) {
+            const typingCandidates = collectCandidateVisitorIds(body);
+            if (typingCandidates.length === 0) {
+              const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+              if (lastVisitorId) typingCandidates.push(lastVisitorId);
+            }
+            for (const visitorId of typingCandidates) {
+              await setTypingState(env, visitorId, typingState, 'agent');
+            }
+        }
 
         if (direction === 'Outbound' && text) {
             if (!env.MESSAGES) {
@@ -170,11 +265,13 @@ async function handleDebugWebhook(env) {
   const orphan = await env.MESSAGES.get('__orphanWebhook');
   const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
   const lastMessages = lastVisitorId ? await env.MESSAGES.get(lastVisitorId) : null;
+  const typing = lastVisitorId ? await getTypingState(env, lastVisitorId) : { isTyping: false, source: null };
 
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
     lastVisitorId: lastVisitorId || null,
     hasLastMessages: Boolean(lastMessages),
+    typing,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
     headers: { 'Content-Type': 'application/json' }
@@ -192,8 +289,9 @@ async function handleGetMessages(request, env) {
   const existing = await env.MESSAGES.get(visitorId);
     const msgs = existing ? JSON.parse(existing) : [];
     const newMsgs = msgs.slice(after);
+    const typing = await getTypingState(env, visitorId);
 
-    return new Response(JSON.stringify({ messages: newMsgs, total: msgs.length }), {
+    return new Response(JSON.stringify({ messages: newMsgs, total: msgs.length, typing }), {
         headers: { 'Content-Type': 'application/json' }
     });
 }
@@ -299,7 +397,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="chat-footer">
-    <textarea id="msg" rows="1" placeholder="Type a message…" oninput="autoResize(this)" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();send();}"></textarea>
+    <textarea id="msg" rows="1" placeholder="Type a message…" oninput="autoResize(this);handleTypingInput();" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();send();}"></textarea>
     <button id="sendBtn" onclick="send()" title="Send">
       <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
     </button>
@@ -312,6 +410,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   let seenCount = 0;
   let typingTimer = null;
   let connected = false;
+  let localTypingSent = false;
 
   function autoResize(el) {
     el.style.height = 'auto';
@@ -381,8 +480,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       });
       if (res.ok) {
         setStatus('Message sent · Waiting for agent reply…');
-        showTyping();
-        typingTimer = setTimeout(removeTyping, 15000);
+        await sendTyping(false);
       } else {
         const reason = await res.text();
         setStatus('Send failed (' + res.status + '): ' + reason);
@@ -394,14 +492,37 @@ const PAGE_HTML = `<!DOCTYPE html>
     input.focus();
   }
 
+  async function sendTyping(isTyping) {
+    if (isTyping === localTypingSent) return;
+    localTypingSent = isTyping;
+    try {
+      await fetch('/send-typing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitorId, isTyping })
+      });
+    } catch { }
+  }
+
+  function handleTypingInput() {
+    const value = document.getElementById('msg').value.trim();
+    sendTyping(value.length > 0);
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => sendTyping(false), 1500);
+  }
+
   async function pollReplies() {
     try {
       const res = await fetch('/get-messages?visitorId=' + visitorId + '&after=' + seenCount);
       if (!res.ok) return;
       const data = await res.json();
       if (!connected) { connected = true; setStatus('Connected · Visitor ID: ' + visitorId + ' · UI ${UI_VERSION}'); }
+      if (data.typing && data.typing.isTyping && data.typing.source === 'agent') {
+        showTyping();
+      } else {
+        removeTyping();
+      }
       if (data.messages && data.messages.length > 0) {
-        clearTimeout(typingTimer);
         removeTyping();
         data.messages.forEach(m => appendBubble('Agent', m.text, 'incoming', m.timestamp));
         seenCount = data.total;
@@ -422,6 +543,7 @@ async function handleRequest(request, env) {
     const pathname = url.pathname;
 
     if (method === 'POST' && pathname === '/send-to-genesys') return handleSendToGenesys(request, env);
+    if (method === 'POST' && pathname === '/send-typing') return handleSendTypingToGenesys(request, env);
     if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request, env);
     if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request, env);
     if (method === 'GET' && pathname === '/health-config') return handleHealthConfig(env);
