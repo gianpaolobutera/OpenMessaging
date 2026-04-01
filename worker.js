@@ -1,8 +1,6 @@
 const GENESYS_REGION = 'euc2'; // Set in Cloudflare dashboard
 const GENESYS_API_URL = `https://api.${GENESYS_REGION}.pure.cloud`;
-const GENESYS_CLIENT_ID = 'YOUR_CLIENT_ID'; // Set as secret in Cloudflare
-const GENESYS_CLIENT_SECRET = 'YOUR_CLIENT_SECRET'; // Set as secret
-const INTEGRATION_ID = 'YOUR_INTEGRATION_ID'; // Set as secret
+// Secrets: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID set in Cloudflare dashboard
 
 async function getAccessToken() {
     const loginBase = GENESYS_API_URL.replace('api.', 'login.');
