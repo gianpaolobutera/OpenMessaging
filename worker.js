@@ -34,7 +34,49 @@ function collectCandidateVisitorIds(payload) {
 async function appendReply(env, visitorId, text) {
   const existing = await env.MESSAGES.get(visitorId);
   const msgs = existing ? JSON.parse(existing) : [];
-  msgs.push({ text, timestamp: new Date().toISOString() });
+  msgs.push({ text, timestamp: new Date().toISOString(), agentName: 'Agent' });
+  await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+}
+
+function extractAgentDisplayName(payload) {
+  const candidates = [
+    payload?.from?.name,
+    payload?.sender?.name,
+    payload?.agent?.name,
+    payload?.user?.name,
+    payload?.event?.from?.name,
+    payload?.event?.sender?.name,
+    payload?.event?.agent?.name,
+    payload?.event?.user?.name,
+    payload?.body?.from?.name,
+    payload?.body?.sender?.name,
+    payload?.body?.agent?.name,
+    payload?.body?.user?.name,
+    payload?.from?.displayName,
+    payload?.sender?.displayName,
+    payload?.agent?.displayName,
+    payload?.event?.from?.displayName,
+    payload?.event?.sender?.displayName,
+    payload?.event?.agent?.displayName,
+    payload?.body?.from?.displayName,
+    payload?.body?.sender?.displayName,
+    payload?.body?.agent?.displayName
+  ];
+
+  for (const name of candidates) {
+    if (typeof name === 'string' && name.trim()) return name.trim();
+  }
+  return 'Agent';
+}
+
+async function appendReplyWithName(env, visitorId, text, agentName) {
+  const existing = await env.MESSAGES.get(visitorId);
+  const msgs = existing ? JSON.parse(existing) : [];
+  msgs.push({
+    text,
+    timestamp: new Date().toISOString(),
+    agentName: agentName || 'Agent'
+  });
   await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
 }
 
@@ -259,6 +301,8 @@ async function handleGenesysWebhook(request, env) {
               return new Response('Missing KV binding: MESSAGES', { status: 500 });
             }
 
+            const agentName = extractAgentDisplayName(body);
+
             const candidates = collectCandidateVisitorIds(body);
             if (candidates.length === 0) {
               const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
@@ -273,7 +317,7 @@ async function handleGenesysWebhook(request, env) {
               }), { expirationTtl: 3600 });
             } else {
               for (const visitorId of candidates) {
-                await appendReply(env, visitorId, text);
+                await appendReplyWithName(env, visitorId, text, agentName);
               }
             }
         }
@@ -486,7 +530,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       '<div class="msg-avatar ' + avatarClass + '">' + avatarLabel + '</div>' +
       '<div>' +
         '<div class="bubble">' + escapeHtml(text) + '</div>' +
-        '<div class="bubble-meta">' + (isOut ? 'You' : 'Agent') + ' · ' + formatTime(timestamp) + '</div>' +
+        '<div class="bubble-meta">' + (isOut ? 'You' : sender) + ' · ' + formatTime(timestamp) + '</div>' +
       '</div>';
     chat.appendChild(row);
     chat.scrollTop = chat.scrollHeight;
@@ -587,7 +631,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       }
       if (data.messages && data.messages.length > 0) {
         removeTyping();
-        data.messages.forEach(m => appendBubble('Agent', m.text, 'incoming', m.timestamp));
+        data.messages.forEach(m => appendBubble(m.agentName || 'Agent', m.text, 'incoming', m.timestamp));
         seenCount = data.total;
         setStatus('Agent replied · ' + formatTime());
       }
