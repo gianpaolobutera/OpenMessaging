@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-02.2';
+const UI_VERSION = '2026-04-02.3';
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -482,6 +482,7 @@ async function handleGenesysWebhook(request, env) {
         const typingEvent = matchesTypingEvent(body);
         const textLikeEvent = msgType === 'text' || eventType === 'message' || Boolean(text);
         const outboundLike = direction === 'Outbound' || textLikeEvent || typingEvent;
+        const candidateCount = collectCandidateVisitorIds(body).length;
         const typingRaw =
           body?.event?.eventType ||
           body?.eventType ||
@@ -496,6 +497,48 @@ async function handleGenesysWebhook(request, env) {
           body?.event?.status ||
           body?.body?.status ||
           null;
+
+        if (env.MESSAGES) {
+          await env.MESSAGES.put('__lastWebhookEvent', JSON.stringify({
+            at: new Date().toISOString(),
+            direction,
+            msgType,
+            eventType,
+            outboundLike,
+            hasText: Boolean(text),
+            textPath,
+            bodyKeys: Object.keys(body || {}),
+            typingRaw,
+            typingState,
+            candidateCount
+          }), { expirationTtl: 3600 });
+
+          if (outboundLike) {
+            await env.MESSAGES.put('__lastOutboundWebhookEvent', JSON.stringify({
+              at: new Date().toISOString(),
+              direction,
+              msgType,
+              eventType,
+              hasText: Boolean(text),
+              textPath,
+              candidateCount,
+              channelFromId: body?.channel?.from?.id || null,
+              channelToId: body?.channel?.to?.id || null
+            }), { expirationTtl: 3600 });
+          }
+
+          if (outboundLike && text) {
+            await env.MESSAGES.put('__lastOutboundTextWebhook', JSON.stringify({
+              at: new Date().toISOString(),
+              direction,
+              msgType,
+              eventType,
+              text,
+              textPath,
+              candidateCount
+            }), { expirationTtl: 3600 });
+          }
+        }
 
         if (typingEvent || (outboundLike && typingState !== null)) {
             const typingCandidates = collectCandidateVisitorIds(body);
@@ -547,7 +590,7 @@ async function handleGenesysWebhook(request, env) {
           bodyKeys: Object.keys(body || {}),
           typingRaw,
           typingState,
-          candidateCount: collectCandidateVisitorIds(body).length
+          candidateCount
         }), { expirationTtl: 3600 });
 
         return new Response('OK', { status: 200 });
@@ -573,6 +616,9 @@ async function handleDebugWebhook(env) {
   const lastMessages = lastVisitorId ? await env.MESSAGES.get(lastVisitorId) : null;
   const typing = lastVisitorId ? await getTypingState(env, lastVisitorId) : { isTyping: false, source: null };
   const lastWebhookTyping = await env.MESSAGES.get('__lastWebhookTyping');
+  const lastWebhookEvent = await env.MESSAGES.get('__lastWebhookEvent');
+  const lastOutboundWebhookEvent = await env.MESSAGES.get('__lastOutboundWebhookEvent');
+  const lastOutboundTextWebhook = await env.MESSAGES.get('__lastOutboundTextWebhook');
   const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
 
   return new Response(JSON.stringify({
@@ -581,6 +627,9 @@ async function handleDebugWebhook(env) {
     hasLastMessages: Boolean(lastMessages),
     typing,
     lastWebhookTyping: lastWebhookTyping ? JSON.parse(lastWebhookTyping) : null,
+    lastWebhookEvent: lastWebhookEvent ? JSON.parse(lastWebhookEvent) : null,
+    lastOutboundWebhookEvent: lastOutboundWebhookEvent ? JSON.parse(lastOutboundWebhookEvent) : null,
+    lastOutboundTextWebhook: lastOutboundTextWebhook ? JSON.parse(lastOutboundTextWebhook) : null,
     lastWebhookAuthFailure: lastWebhookAuthFailure ? JSON.parse(lastWebhookAuthFailure) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
