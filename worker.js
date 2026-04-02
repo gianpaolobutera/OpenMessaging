@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-02.3';
+const UI_VERSION = '2026-04-02.4';
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -80,7 +80,15 @@ function extractAgentDisplayName(payload) {
 
 async function appendReplyWithName(env, visitorId, text, agentName) {
   const existing = await env.MESSAGES.get(visitorId);
-  const msgs = existing ? JSON.parse(existing) : [];
+  let msgs = [];
+  if (existing) {
+    try {
+      const parsed = JSON.parse(existing);
+      msgs = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      msgs = [];
+    }
+  }
   msgs.push({
     text,
     timestamp: new Date().toISOString(),
@@ -305,6 +313,23 @@ function extractWebhookText(payload) {
   }
 
   return { text: null, textPath: null };
+}
+
+function collectOutboundTargetVisitorIds(payload) {
+  const candidates = new Set();
+  const add = (v) => {
+    if (typeof v === 'string' && v.trim()) candidates.add(v.trim());
+  };
+
+  // Prefer recipient/customer fields for outbound events.
+  add(payload?.channel?.to?.id);
+  add(payload?.event?.channel?.to?.id);
+  add(payload?.body?.channel?.to?.id);
+  add(payload?.metadata?.visitorId);
+  add(payload?.event?.metadata?.visitorId);
+  add(payload?.body?.metadata?.visitorId);
+
+  return Array.from(candidates);
 }
 
 async function getAccessToken(env) {
@@ -559,10 +584,15 @@ async function handleGenesysWebhook(request, env) {
 
             const agentName = extractAgentDisplayName(body);
 
-            const candidates = collectCandidateVisitorIds(body);
+            const candidates = collectOutboundTargetVisitorIds(body);
             if (candidates.length === 0) {
               const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
               if (lastVisitorId) candidates.push(lastVisitorId);
+            }
+
+            if (candidates.length === 0) {
+              const fallbackCandidates = collectCandidateVisitorIds(body);
+              for (const v of fallbackCandidates) candidates.push(v);
             }
 
             if (candidates.length === 0) {
@@ -572,10 +602,22 @@ async function handleGenesysWebhook(request, env) {
                 payload: body
               }), { expirationTtl: 3600 });
             } else {
+              const appendResult = {
+                at: new Date().toISOString(),
+                candidates,
+                appended: [],
+                failed: []
+              };
               for (const visitorId of candidates) {
-                await setTypingState(env, visitorId, false, 'agent', 30);
-                await appendReplyWithName(env, visitorId, text, agentName);
+                try {
+                  await setTypingState(env, visitorId, false, 'agent', 30);
+                  await appendReplyWithName(env, visitorId, text, agentName);
+                  appendResult.appended.push(visitorId);
+                } catch (e) {
+                  appendResult.failed.push({ visitorId, error: e.message });
+                }
               }
+              await env.MESSAGES.put('__lastAppendResult', JSON.stringify(appendResult), { expirationTtl: 3600 });
             }
         }
 
@@ -619,6 +661,7 @@ async function handleDebugWebhook(env) {
   const lastWebhookEvent = await env.MESSAGES.get('__lastWebhookEvent');
   const lastOutboundWebhookEvent = await env.MESSAGES.get('__lastOutboundWebhookEvent');
   const lastOutboundTextWebhook = await env.MESSAGES.get('__lastOutboundTextWebhook');
+  const lastAppendResult = await env.MESSAGES.get('__lastAppendResult');
   const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
 
   return new Response(JSON.stringify({
@@ -630,6 +673,7 @@ async function handleDebugWebhook(env) {
     lastWebhookEvent: lastWebhookEvent ? JSON.parse(lastWebhookEvent) : null,
     lastOutboundWebhookEvent: lastOutboundWebhookEvent ? JSON.parse(lastOutboundWebhookEvent) : null,
     lastOutboundTextWebhook: lastOutboundTextWebhook ? JSON.parse(lastOutboundTextWebhook) : null,
+    lastAppendResult: lastAppendResult ? JSON.parse(lastAppendResult) : null,
     lastWebhookAuthFailure: lastWebhookAuthFailure ? JSON.parse(lastWebhookAuthFailure) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
