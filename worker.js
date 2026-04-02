@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-02.1';
+const UI_VERSION = '2026-04-02.2';
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -40,6 +40,9 @@ async function appendReply(env, visitorId, text) {
 
 function extractAgentDisplayName(payload) {
   const candidates = [
+    payload?.channel?.from?.nickname,
+    payload?.channel?.from?.name,
+    payload?.channel?.from?.displayName,
     payload?.from?.name,
     payload?.sender?.name,
     payload?.agent?.name,
@@ -60,7 +63,13 @@ function extractAgentDisplayName(payload) {
     payload?.event?.agent?.displayName,
     payload?.body?.from?.displayName,
     payload?.body?.sender?.displayName,
-    payload?.body?.agent?.displayName
+    payload?.body?.agent?.displayName,
+    payload?.event?.channel?.from?.nickname,
+    payload?.event?.channel?.from?.name,
+    payload?.event?.channel?.from?.displayName,
+    payload?.body?.channel?.from?.nickname,
+    payload?.body?.channel?.from?.name,
+    payload?.body?.channel?.from?.displayName
   ];
 
   for (const name of candidates) {
@@ -394,10 +403,24 @@ async function handleGenesysWebhook(request, env) {
         const body = JSON.parse(rawBody);
         console.log('webhook received:', JSON.stringify(body));
 
-        const direction = body.direction || body.event?.direction || body.body?.direction;
-        const text = body.text || body.event?.text || body.body?.text;
+        const direction = body.direction || body.event?.direction || body.body?.direction || null;
+        const msgType = (body.type || body.event?.type || body.body?.type || '').toString().toLowerCase();
+        const eventType = (body.event?.eventType || body.eventType || body.body?.event?.eventType || '').toString().toLowerCase();
+        const text =
+          body.text ||
+          body.event?.text ||
+          body.body?.text ||
+          body.message?.text ||
+          body.content?.text ||
+          body.event?.message?.text ||
+          body.body?.message?.text ||
+          body.event?.content?.text ||
+          body.body?.content?.text ||
+          null;
         const typingState = extractTypingState(body);
         const typingEvent = matchesTypingEvent(body);
+        const textLikeEvent = msgType === 'text' || eventType === 'message' || Boolean(text);
+        const outboundLike = direction === 'Outbound' || textLikeEvent || typingEvent;
         const typingRaw =
           body?.event?.eventType ||
           body?.eventType ||
@@ -413,7 +436,7 @@ async function handleGenesysWebhook(request, env) {
           body?.body?.status ||
           null;
 
-        if (typingEvent || (direction === 'Outbound' && typingState !== null)) {
+        if (typingEvent || (outboundLike && typingState !== null)) {
             const typingCandidates = collectCandidateVisitorIds(body);
             if (typingCandidates.length === 0) {
               const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
@@ -425,7 +448,7 @@ async function handleGenesysWebhook(request, env) {
             }
         }
 
-        if (direction === 'Outbound' && text) {
+        if (outboundLike && text) {
             if (!env.MESSAGES) {
               return new Response('Missing KV binding: MESSAGES', { status: 500 });
             }
@@ -455,6 +478,10 @@ async function handleGenesysWebhook(request, env) {
         await env.MESSAGES.put('__lastWebhookTyping', JSON.stringify({
           at: new Date().toISOString(),
           direction,
+          msgType,
+          eventType,
+          outboundLike,
+          hasText: Boolean(text),
           typingRaw,
           typingState,
           candidateCount: collectCandidateVisitorIds(body).length
