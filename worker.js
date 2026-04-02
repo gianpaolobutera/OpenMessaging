@@ -236,6 +236,77 @@ function extractTypingState(payload) {
   return null;
 }
 
+function findFirstTextValue(value, path = 'root', depth = 0, seen = new Set()) {
+  if (depth > 8 || value == null) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? { text: trimmed, path } : null;
+  }
+  if (typeof value !== 'object') return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      const hit = findFirstTextValue(value[i], `${path}[${i}]`, depth + 1, seen);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  const priorityKeys = ['text', 'message', 'content', 'body', 'value'];
+  for (const key of priorityKeys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      const hit = findFirstTextValue(value[key], `${path}.${key}`, depth + 1, seen);
+      if (hit) return hit;
+    }
+  }
+
+  for (const [k, v] of Object.entries(value)) {
+    const hit = findFirstTextValue(v, `${path}.${k}`, depth + 1, seen);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function extractWebhookText(payload) {
+  const candidates = [
+    ['text', payload?.text],
+    ['event.text', payload?.event?.text],
+    ['body.text', payload?.body?.text],
+    ['message.text', payload?.message?.text],
+    ['content.text', payload?.content?.text],
+    ['event.message.text', payload?.event?.message?.text],
+    ['event.content.text', payload?.event?.content?.text],
+    ['event.body.text', payload?.event?.body?.text],
+    ['body.message.text', payload?.body?.message?.text],
+    ['body.content.text', payload?.body?.content?.text],
+    ['body.event.message.text', payload?.body?.event?.message?.text],
+    ['body.event.content.text', payload?.body?.event?.content?.text],
+    ['channel.message.text', payload?.channel?.message?.text]
+  ];
+
+  for (const [path, value] of candidates) {
+    if (typeof value === 'string' && value.trim()) {
+      return { text: value.trim(), textPath: path };
+    }
+  }
+
+  const deepSearchRoots = [
+    ['event', payload?.event],
+    ['body', payload?.body],
+    ['message', payload?.message],
+    ['content', payload?.content]
+  ];
+
+  for (const [path, node] of deepSearchRoots) {
+    const hit = findFirstTextValue(node, path);
+    if (hit) return { text: hit.text, textPath: hit.path };
+  }
+
+  return { text: null, textPath: null };
+}
+
 async function getAccessToken(env) {
   if (!env.GENESYS_CLIENT_ID || !env.GENESYS_CLIENT_SECRET) {
     throw new Error('Missing Worker secrets: GENESYS_CLIENT_ID or GENESYS_CLIENT_SECRET');
@@ -406,17 +477,7 @@ async function handleGenesysWebhook(request, env) {
         const direction = body.direction || body.event?.direction || body.body?.direction || null;
         const msgType = (body.type || body.event?.type || body.body?.type || '').toString().toLowerCase();
         const eventType = (body.event?.eventType || body.eventType || body.body?.event?.eventType || '').toString().toLowerCase();
-        const text =
-          body.text ||
-          body.event?.text ||
-          body.body?.text ||
-          body.message?.text ||
-          body.content?.text ||
-          body.event?.message?.text ||
-          body.body?.message?.text ||
-          body.event?.content?.text ||
-          body.body?.content?.text ||
-          null;
+        const { text, textPath } = extractWebhookText(body);
         const typingState = extractTypingState(body);
         const typingEvent = matchesTypingEvent(body);
         const textLikeEvent = msgType === 'text' || eventType === 'message' || Boolean(text);
@@ -482,6 +543,8 @@ async function handleGenesysWebhook(request, env) {
           eventType,
           outboundLike,
           hasText: Boolean(text),
+          textPath,
+          bodyKeys: Object.keys(body || {}),
           typingRaw,
           typingState,
           candidateCount: collectCandidateVisitorIds(body).length
