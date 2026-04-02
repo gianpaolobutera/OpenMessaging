@@ -131,6 +131,16 @@ function bytesToHex(bytes) {
     .join('');
 }
 
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+function toBase64Url(value) {
+  return value.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
 function constantTimeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   if (a.length !== b.length) return false;
@@ -155,8 +165,19 @@ async function validateWebhookSignature(rawBody, signatureHeader, secret) {
   );
 
   const mac = await crypto.subtle.sign('HMAC', key, enc.encode(rawBody));
-  const expectedHex = bytesToHex(new Uint8Array(mac));
-  return constantTimeEqual(expectedHex, normalizedSignature.toLowerCase());
+  const macBytes = new Uint8Array(mac);
+  const expectedHex = bytesToHex(macBytes);
+  const expectedBase64 = bytesToBase64(macBytes);
+  const expectedBase64Url = toBase64Url(expectedBase64);
+
+  const candidate = normalizedSignature.trim();
+  const candidateLower = candidate.toLowerCase();
+
+  return (
+    constantTimeEqual(expectedHex, candidateLower) ||
+    constantTimeEqual(expectedBase64, candidate) ||
+    constantTimeEqual(expectedBase64Url, candidate)
+  );
 }
 
 async function getTypingState(env, visitorId) {
@@ -359,6 +380,14 @@ async function handleGenesysWebhook(request, env) {
         const rawBody = await request.text();
         const validSignature = await validateWebhookSignature(rawBody, signatureHeader, env.GENESYS_WEBHOOK_SECRET);
         if (!validSignature) {
+          if (env.MESSAGES) {
+            await env.MESSAGES.put('__lastWebhookAuthFailure', JSON.stringify({
+              at: new Date().toISOString(),
+              hasSignatureHeader: Boolean(signatureHeader),
+              signaturePrefix: signatureHeader ? signatureHeader.slice(0, 24) : null,
+              bodyLength: rawBody.length
+            }), { expirationTtl: 3600 });
+          }
           return new Response('Invalid webhook signature', { status: 401 });
         }
 
@@ -454,6 +483,7 @@ async function handleDebugWebhook(env) {
   const lastMessages = lastVisitorId ? await env.MESSAGES.get(lastVisitorId) : null;
   const typing = lastVisitorId ? await getTypingState(env, lastVisitorId) : { isTyping: false, source: null };
   const lastWebhookTyping = await env.MESSAGES.get('__lastWebhookTyping');
+  const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
 
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
@@ -461,6 +491,7 @@ async function handleDebugWebhook(env) {
     hasLastMessages: Boolean(lastMessages),
     typing,
     lastWebhookTyping: lastWebhookTyping ? JSON.parse(lastWebhookTyping) : null,
+    lastWebhookAuthFailure: lastWebhookAuthFailure ? JSON.parse(lastWebhookAuthFailure) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
     headers: { 'Content-Type': 'application/json' }
