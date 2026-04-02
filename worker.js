@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-01.5';
+const UI_VERSION = '2026-04-02.1';
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -80,13 +80,83 @@ async function appendReplyWithName(env, visitorId, text, agentName) {
   await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
 }
 
-async function setTypingState(env, visitorId, isTyping, source) {
+async function setTypingState(env, visitorId, isTyping, source, ttlSeconds = 120) {
   const payload = {
     isTyping: Boolean(isTyping),
     source: source || 'unknown',
     at: new Date().toISOString()
   };
-  await env.MESSAGES.put(`__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: 120 });
+  await env.MESSAGES.put(`__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: ttlSeconds });
+}
+
+function matchesTypingEvent(payload) {
+  const typeCandidates = [
+    payload?.type,
+    payload?.event?.type,
+    payload?.body?.type,
+    payload?.event?.messageType,
+    payload?.body?.event?.messageType
+  ];
+
+  const eventTypeCandidates = [
+    payload?.event?.eventType,
+    payload?.eventType,
+    payload?.body?.event?.eventType,
+    payload?.body?.eventType,
+    payload?.event?.type,
+    payload?.body?.event?.type
+  ];
+
+  const hasEventTypeTyping = eventTypeCandidates.some(
+    (v) => typeof v === 'string' && v.toLowerCase() === 'typing'
+  );
+
+  const hasEventContainer = typeCandidates.some(
+    (v) => typeof v === 'string' && v.toLowerCase() === 'event'
+  );
+
+  return hasEventTypeTyping || (hasEventContainer && hasEventTypeTyping);
+}
+
+function normalizeSignatureHeader(headerValue) {
+  if (!headerValue || typeof headerValue !== 'string') return null;
+  const trimmed = headerValue.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith('sha256=') ? trimmed.slice(7) : trimmed;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function constantTimeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+async function validateWebhookSignature(rawBody, signatureHeader, secret) {
+  const normalizedSignature = normalizeSignatureHeader(signatureHeader);
+  if (!normalizedSignature || !secret) return false;
+
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const mac = await crypto.subtle.sign('HMAC', key, enc.encode(rawBody));
+  const expectedHex = bytesToHex(new Uint8Array(mac));
+  return constantTimeEqual(expectedHex, normalizedSignature.toLowerCase());
 }
 
 async function getTypingState(env, visitorId) {
@@ -229,22 +299,39 @@ async function handleSendTypingToGenesys(request, env) {
       await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
       await setTypingState(env, visitorId, isTyping, 'customer');
 
-      // Best effort pass-through to Genesys; ignore if integration does not support typing events.
+      // Genesys Open Messaging typing events are "start typing" events.
+      // No explicit stop event is required by the inbound open event API.
+      if (!isTyping) {
+        return new Response('OK', { status: 200 });
+      }
+
+      const nowMs = Date.now();
+      const lastSentRaw = await env.MESSAGES.get(`__typingLastSent:${visitorId}`);
+      const lastSentMs = lastSentRaw ? parseInt(lastSentRaw, 10) : 0;
+      if (Number.isFinite(lastSentMs) && nowMs - lastSentMs < 5000) {
+        return new Response('OK', { status: 200 });
+      }
+      await env.MESSAGES.put(`__typingLastSent:${visitorId}`, String(nowMs), { expirationTtl: 120 });
+
       try {
         const token = await getAccessToken(env);
         const now = new Date().toISOString();
-        const messageId = `${visitorId}-${crypto.randomUUID()}`;
+        const eventId = `${visitorId}-typing-${crypto.randomUUID()}`;
         const payload = {
           channel: {
-            messageId,
+            platform: 'Open',
+            type: 'Private',
+            messageId: eventId,
+            to: { id: env.INTEGRATION_ID },
             from: { id: visitorId, idType: 'Opaque' },
             time: now
           },
-          direction: 'Inbound',
-          eventType: 'Typing',
-          typing: { state: isTyping ? 'On' : 'Off' }
+          type: 'Event',
+          event: {
+            eventType: 'Typing'
+          }
         };
-        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
+        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/inbound/open/event`;
         await fetch(endpoint, {
           method: 'POST',
           headers: {
@@ -264,35 +351,48 @@ async function handleSendTypingToGenesys(request, env) {
 
 async function handleGenesysWebhook(request, env) {
     try {
-        const body = await request.json();
+        if (!env.GENESYS_WEBHOOK_SECRET) {
+          return new Response('Missing Worker secret: GENESYS_WEBHOOK_SECRET', { status: 500 });
+        }
+
+        const signatureHeader = request.headers.get('X-Hub-Signature-256');
+        const rawBody = await request.text();
+        const validSignature = await validateWebhookSignature(rawBody, signatureHeader, env.GENESYS_WEBHOOK_SECRET);
+        if (!validSignature) {
+          return new Response('Invalid webhook signature', { status: 401 });
+        }
+
+        const body = JSON.parse(rawBody);
         console.log('webhook received:', JSON.stringify(body));
 
         const direction = body.direction || body.event?.direction || body.body?.direction;
         const text = body.text || body.event?.text || body.body?.text;
         const typingState = extractTypingState(body);
+        const typingEvent = matchesTypingEvent(body);
         const typingRaw =
+          body?.event?.eventType ||
+          body?.eventType ||
+          body?.body?.event?.eventType ||
           body?.typing?.state ||
           body?.event?.typing?.state ||
           body?.body?.typing?.state ||
           body?.typingState ||
           body?.event?.typingState ||
           body?.body?.typingState ||
-          body?.eventType ||
-          body?.event?.eventType ||
-          body?.body?.eventType ||
           body?.status ||
           body?.event?.status ||
           body?.body?.status ||
           null;
 
-        if (direction === 'Outbound' && typingState !== null) {
+        if (typingEvent || (direction === 'Outbound' && typingState !== null)) {
             const typingCandidates = collectCandidateVisitorIds(body);
             if (typingCandidates.length === 0) {
               const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
               if (lastVisitorId) typingCandidates.push(lastVisitorId);
             }
             for (const visitorId of typingCandidates) {
-              await setTypingState(env, visitorId, typingState, 'agent');
+              // Outbound typing is ephemeral: expire automatically if no follow-up typing event arrives.
+              await setTypingState(env, visitorId, true, 'agent', 8);
             }
         }
 
@@ -317,6 +417,7 @@ async function handleGenesysWebhook(request, env) {
               }), { expirationTtl: 3600 });
             } else {
               for (const visitorId of candidates) {
+                await setTypingState(env, visitorId, false, 'agent', 30);
                 await appendReplyWithName(env, visitorId, text, agentName);
               }
             }
@@ -388,9 +489,10 @@ async function handleHealthConfig(env) {
   const hasClientId = Boolean(env.GENESYS_CLIENT_ID);
   const hasClientSecret = Boolean(env.GENESYS_CLIENT_SECRET);
   const hasIntegrationId = Boolean(env.INTEGRATION_ID);
+  const hasWebhookSecret = Boolean(env.GENESYS_WEBHOOK_SECRET);
   const hasMessagesKv = Boolean(env.MESSAGES);
 
-  const ok = hasClientId && hasClientSecret && hasIntegrationId && hasMessagesKv;
+  const ok = hasClientId && hasClientSecret && hasIntegrationId && hasWebhookSecret && hasMessagesKv;
 
   return new Response(JSON.stringify({
     ok,
@@ -400,6 +502,7 @@ async function handleHealthConfig(env) {
       hasClientId,
       hasClientSecret,
       hasIntegrationId,
+      hasWebhookSecret,
       hasMessagesKv
     }
   }), {

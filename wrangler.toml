@@ -1,16 +1,48 @@
 name = "openmess"
 main = "worker.js"
 compatibility_date = "2024-01-01"
+workers_dev = true
 
 # Versioned non-secret vars (persist via Git + redeploy)
 [vars]
 GENESYS_REGION = "euc2"
 GENESYS_API_URL = "https://api.euc2.pure.cloud"
 
+# Explicit production environment so `wrangler deploy --env production`
+# keeps the same non-secret runtime values as the default environment.
+[env.production]
+
+[env.production.vars]
+GENESYS_REGION = "euc2"
+GENESYS_API_URL = "https://api.euc2.pure.cloud"
+
+# Required KV binding for both default and production deploys.
+# Replace the placeholders below with your real namespace IDs, then uncomment.
+#
+# [[kv_namespaces]]
+# binding = "MESSAGES"
+# id = "YOUR_MESSAGES_KV_NAMESPACE_ID"
+# preview_id = "YOUR_MESSAGES_KV_PREVIEW_ID"
+#
+# [[env.production.kv_namespaces]]
+# binding = "MESSAGES"
+# id = "YOUR_MESSAGES_KV_NAMESPACE_ID"
+# preview_id = "YOUR_MESSAGES_KV_PREVIEW_ID"
+
 # Keep these in Cloudflare Secrets (persist across deploys, never commit values):
 # - GENESYS_CLIENT_ID
 # - GENESYS_CLIENT_SECRET
 # - INTEGRATION_ID
+# - GENESYS_WEBHOOK_SECRET
 #
-# Keep this binding configured in Cloudflare Worker settings:
-# - KV binding: MESSAGES
+# Required secrets for the default environment:
+# - npx wrangler secret put GENESYS_CLIENT_ID
+# - npx wrangler secret put GENESYS_CLIENT_SECRET
+# - npx wrangler secret put INTEGRATION_ID
+# - npx wrangler secret put GENESYS_WEBHOOK_SECRET
+#
+# Required secrets for the production environment:
+# - npx wrangler secret put GENESYS_CLIENT_ID --env production
+# - npx wrangler secret put GENESYS_CLIENT_SECRET --env production
+# - npx wrangler secret put INTEGRATION_ID --env production
+# - npx wrangler secret put GENESYS_WEBHOOK_SECRET --env production
