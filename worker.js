@@ -610,7 +610,7 @@ async function handleGenesysWebhook(request, env) {
               };
               for (const visitorId of candidates) {
                 try {
-                  await setTypingState(env, visitorId, false, 'agent', 30);
+                  await setTypingState(env, visitorId, false, 'agent', 60);
                   await appendReplyWithName(env, visitorId, text, agentName);
                   appendResult.appended.push(visitorId);
                 } catch (e) {
