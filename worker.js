@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-02.5';
+const UI_VERSION = '2026-04-02.6';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 
@@ -217,31 +217,95 @@ async function getTypingState(env, visitorId) {
   }
 }
 
-async function postTypingEventToGenesys(env, token, payload) {
-  const endpoints = [
-    `${getGenesysApiUrl(env)}/api/v2/conversations/messages/inbound/open/event`
+async function postTypingEventToGenesys(env, token, visitorId) {
+  const now = new Date().toISOString();
+  const eventId = `${visitorId}-typing-${crypto.randomUUID()}`;
+
+  const typingPayloadVariants = [
+    {
+      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/inbound/open/event`,
+      payload: {
+        channel: {
+          platform: 'Open',
+          type: 'Private',
+          messageId: eventId,
+          to: { id: env.INTEGRATION_ID },
+          from: { id: visitorId, idType: 'Opaque' },
+          time: now
+        },
+        type: 'Event',
+        event: { eventType: 'Typing' }
+      },
+      label: 'open-event-global'
+    },
+    {
+      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`,
+      payload: {
+        channel: {
+          platform: 'Open',
+          type: 'Private',
+          messageId: eventId,
+          from: { id: visitorId, idType: 'Opaque' },
+          time: now
+        },
+        type: 'Event',
+        event: { eventType: 'Typing' }
+      },
+      label: 'open-event-integration'
+    },
+    {
+      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`,
+      payload: {
+        channel: {
+          messageId: eventId,
+          from: { id: visitorId, idType: 'Opaque' },
+          time: now
+        },
+        type: 'Event',
+        direction: 'Inbound',
+        event: { eventType: 'Typing' }
+      },
+      label: 'open-message-event'
+    },
+    {
+      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`,
+      payload: {
+        channel: {
+          messageId: eventId,
+          from: { id: visitorId, idType: 'Opaque' },
+          time: now
+        },
+        direction: 'Inbound',
+        eventType: 'Typing',
+        typing: { state: 'On' }
+      },
+      label: 'open-message-typing-state'
+    }
   ];
 
-  if (env.INTEGRATION_ID) {
-    endpoints.push(
-      `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`
-    );
-  }
-
   const attempts = [];
-  for (const endpoint of endpoints) {
+  for (const variant of typingPayloadVariants) {
+    if (!variant.endpoint.includes('/undefined/')) {
+      const endpoint = variant.endpoint;
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(variant.payload)
     });
 
     const bodyText = await res.text();
-    attempts.push({ endpoint, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
+      attempts.push({
+        label: variant.label,
+        endpoint,
+        status: res.status,
+        ok: res.ok,
+        body: bodyText.slice(0, 500)
+      });
     if (res.ok) return { ok: true, attempts };
+    }
   }
 
   return { ok: false, attempts };
@@ -481,23 +545,7 @@ async function handleSendTypingToGenesys(request, env) {
 
       try {
         const token = await getAccessToken(env);
-        const now = new Date().toISOString();
-        const eventId = `${visitorId}-typing-${crypto.randomUUID()}`;
-        const payload = {
-          channel: {
-            platform: 'Open',
-            type: 'Private',
-            messageId: eventId,
-            to: { id: env.INTEGRATION_ID },
-            from: { id: visitorId, idType: 'Opaque' },
-            time: now
-          },
-          type: 'Event',
-          event: {
-            eventType: 'Typing'
-          }
-        };
-        const result = await postTypingEventToGenesys(env, token, payload);
+        const result = await postTypingEventToGenesys(env, token, visitorId);
         await env.MESSAGES.put('__lastCustomerTypingSend', JSON.stringify({
           at: new Date().toISOString(),
           visitorId,
