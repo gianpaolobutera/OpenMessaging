@@ -2,7 +2,9 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-02.4';
+const UI_VERSION = '2026-04-02.5';
+const MIN_KV_TTL_SECONDS = 60;
+const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -98,12 +100,13 @@ async function appendReplyWithName(env, visitorId, text, agentName) {
 }
 
 async function setTypingState(env, visitorId, isTyping, source, ttlSeconds = 120) {
+  const safeTtl = Math.max(MIN_KV_TTL_SECONDS, Number(ttlSeconds) || 0);
   const payload = {
     isTyping: Boolean(isTyping),
     source: source || 'unknown',
     at: new Date().toISOString()
   };
-  await env.MESSAGES.put(`__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: ttlSeconds });
+  await env.MESSAGES.put(`__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: safeTtl });
 }
 
 function matchesTypingEvent(payload) {
@@ -201,10 +204,47 @@ async function getTypingState(env, visitorId) {
   const raw = await env.MESSAGES.get(`__typing:${visitorId}`);
   if (!raw) return { isTyping: false, source: null };
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.isTyping && parsed.source === 'agent' && parsed.at) {
+      const ageMs = Date.now() - Date.parse(parsed.at);
+      if (Number.isFinite(ageMs) && ageMs > AGENT_TYPING_UI_WINDOW_SECONDS * 1000) {
+        return { isTyping: false, source: 'agent', at: parsed.at, expired: true };
+      }
+    }
+    return parsed;
   } catch {
     return { isTyping: false, source: null };
   }
+}
+
+async function postTypingEventToGenesys(env, token, payload) {
+  const endpoints = [
+    `${getGenesysApiUrl(env)}/api/v2/conversations/messages/inbound/open/event`
+  ];
+
+  if (env.INTEGRATION_ID) {
+    endpoints.push(
+      `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`
+    );
+  }
+
+  const attempts = [];
+  for (const endpoint of endpoints) {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const bodyText = await res.text();
+    attempts.push({ endpoint, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
+    if (res.ok) return { ok: true, attempts };
+  }
+
+  return { ok: false, attempts };
 }
 
 function extractTypingState(payload) {
@@ -457,15 +497,13 @@ async function handleSendTypingToGenesys(request, env) {
             eventType: 'Typing'
           }
         };
-        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/inbound/open/event`;
-        await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload)
-        });
+        const result = await postTypingEventToGenesys(env, token, payload);
+        await env.MESSAGES.put('__lastCustomerTypingSend', JSON.stringify({
+          at: new Date().toISOString(),
+          visitorId,
+          accepted: result.ok,
+          attempts: result.attempts
+        }), { expirationTtl: 3600 });
       } catch {
       }
 
@@ -662,6 +700,7 @@ async function handleDebugWebhook(env) {
   const lastOutboundWebhookEvent = await env.MESSAGES.get('__lastOutboundWebhookEvent');
   const lastOutboundTextWebhook = await env.MESSAGES.get('__lastOutboundTextWebhook');
   const lastAppendResult = await env.MESSAGES.get('__lastAppendResult');
+  const lastCustomerTypingSend = await env.MESSAGES.get('__lastCustomerTypingSend');
   const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
 
   return new Response(JSON.stringify({
@@ -674,6 +713,7 @@ async function handleDebugWebhook(env) {
     lastOutboundWebhookEvent: lastOutboundWebhookEvent ? JSON.parse(lastOutboundWebhookEvent) : null,
     lastOutboundTextWebhook: lastOutboundTextWebhook ? JSON.parse(lastOutboundTextWebhook) : null,
     lastAppendResult: lastAppendResult ? JSON.parse(lastAppendResult) : null,
+    lastCustomerTypingSend: lastCustomerTypingSend ? JSON.parse(lastCustomerTypingSend) : null,
     lastWebhookAuthFailure: lastWebhookAuthFailure ? JSON.parse(lastWebhookAuthFailure) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
