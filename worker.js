@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-02.6';
+const UI_VERSION = '2026-04-02.7';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 
@@ -222,6 +222,27 @@ async function postTypingEventToGenesys(env, token, visitorId) {
   const eventId = `${visitorId}-typing-${crypto.randomUUID()}`;
 
   const typingPayloadVariants = [
+    {
+      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`,
+      payload: {
+        channel: {
+          platform: 'Open',
+          type: 'Open',
+          messageId: eventId,
+          to: { id: env.INTEGRATION_ID },
+          from: { id: visitorId },
+          time: now
+        },
+        type: 'Event',
+        event: {
+          eventType: 'Typing',
+          typing: {
+            type: 'On'
+          }
+        }
+      },
+      label: 'open-event-integration-user-payload'
+    },
     {
       endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/inbound/open/event`,
       payload: {
