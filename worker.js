@@ -17,6 +17,25 @@ function jsonResponse(payload, status = 200) {
   });
 }
 
+function isKvPutLimitError(err) {
+  const msg = err && err.message ? String(err.message) : '';
+  return /kv put\(\) limit exceeded/i.test(msg);
+}
+
+async function safeKvPut(env, key, value, options) {
+  if (!env || !env.MESSAGES) return false;
+  try {
+    await env.MESSAGES.put(key, value, options);
+    return true;
+  } catch (err) {
+    if (isKvPutLimitError(err)) {
+      console.warn(`KV quota reached; skipping write for key ${key}`);
+      return false;
+    }
+    throw err;
+  }
+}
+
 function collectCandidateVisitorIds(payload) {
   const candidates = new Set();
   const add = (v) => {
@@ -113,7 +132,7 @@ async function setTypingState(env, visitorId, isTyping, source, ttlSeconds = 120
     source: source || 'unknown',
     at: new Date().toISOString()
   };
-  await env.MESSAGES.put(`__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: safeTtl });
+  await safeKvPut(env, `__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: safeTtl });
 }
 
 function matchesTypingEvent(payload) {
@@ -580,7 +599,7 @@ async function handleSendToGenesys(request, env) {
         }
 
         const token = await getAccessToken(env);
-        await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
+        await safeKvPut(env, '__lastVisitorId', visitorId, { expirationTtl: 3600 });
         await setTypingState(env, visitorId, false, 'customer');
         const firstEventMarkerKey = `__convInit:${visitorId}`;
         const markerExists = Boolean(await env.MESSAGES.get(firstEventMarkerKey));
@@ -625,7 +644,7 @@ async function handleSendToGenesys(request, env) {
             { label: 'base', payload }
           ];
 
-          await env.MESSAGES.put('__lastInitialEventSend', JSON.stringify({
+          await safeKvPut(env, '__lastInitialEventSend', JSON.stringify({
             at: now,
             visitorId,
             skipped: true,
@@ -653,7 +672,7 @@ async function handleSendToGenesys(request, env) {
           if (res.ok) break;
         }
 
-        await env.MESSAGES.put('__lastFirstEventSeedAttempts', JSON.stringify({
+        await safeKvPut(env, '__lastFirstEventSeedAttempts', JSON.stringify({
           at: now,
           visitorId,
           isFirstCustomerEvent,
@@ -662,9 +681,9 @@ async function handleSendToGenesys(request, env) {
 
         if (genesysResponse && genesysResponse.ok) {
           if (isFirstCustomerEvent) {
-            await env.MESSAGES.put(firstEventMarkerKey, now, { expirationTtl: 1800 });
+            await safeKvPut(env, firstEventMarkerKey, now, { expirationTtl: 1800 });
             const successAttempt = attemptLog.find((a) => a.ok) || null;
-            await env.MESSAGES.put('__lastParticipantDataSeed', JSON.stringify({
+            await safeKvPut(env, '__lastParticipantDataSeed', JSON.stringify({
               at: now,
               visitorId,
               participantData,
@@ -693,7 +712,7 @@ async function handleSendTypingToGenesys(request, env) {
       }
 
       if (!env.MESSAGES) return new Response('Missing KV binding: MESSAGES', { status: 500 });
-      await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
+      await safeKvPut(env, '__lastVisitorId', visitorId, { expirationTtl: 3600 });
       await setTypingState(env, visitorId, isTyping, 'customer');
 
       // Genesys Open Messaging typing events are "start typing" events.
@@ -708,12 +727,12 @@ async function handleSendTypingToGenesys(request, env) {
       if (Number.isFinite(lastSentMs) && nowMs - lastSentMs < 5000) {
         return new Response('OK', { status: 200 });
       }
-      await env.MESSAGES.put(`__typingLastSent:${visitorId}`, String(nowMs), { expirationTtl: 120 });
+      await safeKvPut(env, `__typingLastSent:${visitorId}`, String(nowMs), { expirationTtl: 120 });
 
       try {
         const token = await getAccessToken(env);
         const result = await postTypingEventToGenesys(env, token, visitorId);
-        await env.MESSAGES.put('__lastCustomerTypingSend', JSON.stringify({
+        await safeKvPut(env, '__lastCustomerTypingSend', JSON.stringify({
           at: new Date().toISOString(),
           visitorId,
           accepted: result.ok,
@@ -1254,7 +1273,7 @@ const PAGE_HTML = `<!DOCTYPE html>
     } catch (e) { setStatus('Polling error — retrying…'); }
   }
 
-  setInterval(pollReplies, 2000);
+  setInterval(pollReplies, 8000);
   setTimeout(() => { if (!connected) setStatus('Ready · Visitor ID: ' + visitorId + ' · UI ${UI_VERSION}'); }, 2000);
 </script>
 </body>
