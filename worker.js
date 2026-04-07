@@ -571,8 +571,17 @@ async function handleSendToGenesys(request, env) {
         const token = await getAccessToken(env);
         await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
         await setTypingState(env, visitorId, false, 'customer');
+        const firstEventMarkerKey = `__convInit:${visitorId}`;
+        const isFirstCustomerEvent = !(await env.MESSAGES.get(firstEventMarkerKey));
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
+
+        const participantData = {
+          visitorId,
+          channel: 'open-messaging-webchat',
+          uiVersion: UI_VERSION,
+          conversationStartAt: now
+        };
 
         const payload = {
             channel: {
@@ -584,6 +593,15 @@ async function handleSendToGenesys(request, env) {
             text
         };
 
+        if (isFirstCustomerEvent) {
+          // Include participant data on the first customer event so Architect/Data Actions can map inputs reliably.
+          payload.metadata = {
+            visitorId,
+            participantData,
+            customAttributes: participantData
+          };
+        }
+
         const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
         const genesysResponse = await fetch(endpoint, {
             method: 'POST',
@@ -594,7 +612,17 @@ async function handleSendToGenesys(request, env) {
             body: JSON.stringify(payload)
         });
 
-        if (genesysResponse.ok) return new Response('OK', { status: 200 });
+        if (genesysResponse.ok) {
+          if (isFirstCustomerEvent) {
+            await env.MESSAGES.put(firstEventMarkerKey, now, { expirationTtl: 86400 });
+            await env.MESSAGES.put('__lastParticipantDataSeed', JSON.stringify({
+              at: now,
+              visitorId,
+              participantData
+            }), { expirationTtl: 3600 });
+          }
+          return new Response('OK', { status: 200 });
+        }
 
         const errorData = await genesysResponse.text();
         return new Response(errorData, { status: genesysResponse.status });
