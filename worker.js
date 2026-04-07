@@ -593,26 +593,55 @@ async function handleSendToGenesys(request, env) {
             text
         };
 
+        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
+        const payloadVariants = [payload];
         if (isFirstCustomerEvent) {
-          // Include participant data on the first customer event so Architect/Data Actions can map inputs reliably.
-          payload.metadata = {
+          const flat = {
             visitorId,
-            participantData,
-            customAttributes: participantData
+            channel: participantData.channel,
+            uiVersion: participantData.uiVersion,
+            conversationStartAt: participantData.conversationStartAt
           };
+          payloadVariants.unshift(
+            { ...payload, metadata: flat },
+            { ...payload, customAttributes: flat },
+            { ...payload, channel: { ...payload.channel, metadata: flat } }
+          );
         }
 
-        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
-        const genesysResponse = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-        });
+        let genesysResponse = null;
+        const attemptLog = [];
+        for (let i = 0; i < payloadVariants.length; i += 1) {
+          const variant = payloadVariants[i];
+          const variantLabel =
+            i === 0 && isFirstCustomerEvent ? 'metadata' :
+            i === 1 && isFirstCustomerEvent ? 'customAttributes' :
+            i === 2 && isFirstCustomerEvent ? 'channel.metadata' :
+            'base';
 
-        if (genesysResponse.ok) {
+          const res = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(variant)
+          });
+
+          const bodyText = await res.text();
+          attemptLog.push({ variant: variantLabel, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
+          genesysResponse = { status: res.status, ok: res.ok, bodyText };
+          if (res.ok) break;
+        }
+
+        await env.MESSAGES.put('__lastFirstEventSeedAttempts', JSON.stringify({
+          at: now,
+          visitorId,
+          isFirstCustomerEvent,
+          attempts: attemptLog
+        }), { expirationTtl: 3600 });
+
+        if (genesysResponse && genesysResponse.ok) {
           if (isFirstCustomerEvent) {
             await env.MESSAGES.put(firstEventMarkerKey, now, { expirationTtl: 86400 });
             await env.MESSAGES.put('__lastParticipantDataSeed', JSON.stringify({
@@ -624,8 +653,9 @@ async function handleSendToGenesys(request, env) {
           return new Response('OK', { status: 200 });
         }
 
-        const errorData = await genesysResponse.text();
-        return new Response(errorData, { status: genesysResponse.status });
+        const errorData = genesysResponse ? genesysResponse.bodyText : 'No response from Genesys';
+        const errorStatus = genesysResponse ? genesysResponse.status : 500;
+        return new Response(errorData, { status: errorStatus });
     } catch (err) {
       return new Response(`send-to-genesys failed: ${err.message}`, { status: 500 });
     }
