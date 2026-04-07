@@ -559,7 +559,7 @@ async function handleSendToGenesys(request, env) {
       body = JSON.parse(normalized);
     }
 
-        const { text, visitorId, seedParticipantData } = body;
+        const { text, visitorId, seedParticipantData, participantAttributes } = body;
     if (!text || !visitorId) {
       return new Response('Missing required fields: text, visitorId', { status: 400 });
     }
@@ -595,7 +595,9 @@ async function handleSendToGenesys(request, env) {
         };
 
         const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
-        const payloadVariants = [payload];
+        let payloadVariants = [
+          { label: 'base', payload }
+        ];
         if (isFirstCustomerEvent) {
           const flat = {
             visitorId,
@@ -603,25 +605,55 @@ async function handleSendToGenesys(request, env) {
             uiVersion: participantData.uiVersion,
             conversationStartAt: participantData.conversationStartAt
           };
-          payloadVariants.unshift(
-            { ...payload, channel: { ...payload.channel, customAttributes: flat } },
-            { ...payload, channel: { ...payload.channel, metadata: { customAttributes: flat } } },
-            { ...payload, metadata: { customAttributes: flat } },
-            { ...payload, metadata: flat },
-            { ...payload, customAttributes: flat },
-            { ...payload, channel: { ...payload.channel, metadata: flat } }
-          );
+          const attrs = (participantAttributes && typeof participantAttributes === 'object')
+            ? participantAttributes
+            : {
+                customerId: visitorId,
+                tier: 'standard',
+                language: 'en',
+                isVip: 'false',
+                uiVersion: UI_VERSION
+              };
+
+          payloadVariants = [
+            {
+              label: 'context.participant.attributes',
+              payload: {
+                eventType: 'message',
+                channel: {
+                  type: 'Open',
+                  to: { id: env.INTEGRATION_ID },
+                  from: { id: visitorId, idType: 'opaque' }
+                },
+                message: {
+                  id: messageId,
+                  type: 'Text',
+                  text,
+                  direction: 'Inbound',
+                  timestamp: now
+                },
+                context: {
+                  participant: {
+                    id: visitorId,
+                    attributes: attrs
+                  }
+                }
+              }
+            },
+            { label: 'channel.customAttributes', payload: { ...payload, channel: { ...payload.channel, customAttributes: flat } } },
+            { label: 'channel.metadata.customAttributes', payload: { ...payload, channel: { ...payload.channel, metadata: { customAttributes: flat } } } },
+            { label: 'metadata.customAttributes', payload: { ...payload, metadata: { customAttributes: flat } } },
+            { label: 'metadata', payload: { ...payload, metadata: flat } },
+            { label: 'customAttributes', payload: { ...payload, customAttributes: flat } },
+            { label: 'channel.metadata', payload: { ...payload, channel: { ...payload.channel, metadata: flat } } },
+            { label: 'base', payload }
+          ];
         }
 
         let genesysResponse = null;
         const attemptLog = [];
         for (let i = 0; i < payloadVariants.length; i += 1) {
           const variant = payloadVariants[i];
-          const variantLabel =
-            i === 0 && isFirstCustomerEvent ? 'metadata' :
-            i === 1 && isFirstCustomerEvent ? 'customAttributes' :
-            i === 2 && isFirstCustomerEvent ? 'channel.metadata' :
-            'base';
 
           const res = await fetch(endpoint, {
               method: 'POST',
@@ -629,11 +661,11 @@ async function handleSendToGenesys(request, env) {
                   'Authorization': `Bearer ${token}`,
                   'Content-Type': 'application/json'
               },
-              body: JSON.stringify(variant)
+              body: JSON.stringify(variant.payload)
           });
 
           const bodyText = await res.text();
-          attemptLog.push({ variant: variantLabel, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
+          attemptLog.push({ variant: variant.label, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
           genesysResponse = { status: res.status, ok: res.ok, bodyText };
           if (res.ok) break;
         }
