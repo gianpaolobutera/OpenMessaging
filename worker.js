@@ -2,12 +2,19 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-07.3';
+const UI_VERSION = '2026-04-07.4';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
+}
+
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'Content-Type': 'application/json' }
+  });
 }
 
 function collectCandidateVisitorIds(payload) {
@@ -666,7 +673,7 @@ async function handleGenesysWebhook(request, env) {
               bodyLength: rawBody.length
             }), { expirationTtl: 3600 });
           }
-          return new Response('Invalid webhook signature', { status: 401 });
+          return jsonResponse({ ok: false, error: 'Invalid webhook signature' }, 401);
         }
 
         const body = JSON.parse(rawBody);
@@ -833,10 +840,10 @@ async function handleGenesysWebhook(request, env) {
           candidateCount
         }), { expirationTtl: 3600 });
 
-        return new Response('OK', { status: 200 });
+        return jsonResponse({ ok: true });
     } catch (err) {
         console.error('webhook error', err.message);
-        return new Response(err.message, { status: 500 });
+        return jsonResponse({ ok: false, error: err.message }, 500);
     }
 }
 
