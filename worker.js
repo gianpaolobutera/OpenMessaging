@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-02.7';
+const UI_VERSION = '2026-04-07.1';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 
@@ -457,6 +457,35 @@ function collectOutboundTargetVisitorIds(payload) {
   return Array.from(candidates);
 }
 
+function resolveOutboundVisitorIds(payload, env, lastVisitorId) {
+  const preferred = collectOutboundTargetVisitorIds(payload);
+  const all = collectCandidateVisitorIds(payload);
+  const merged = Array.from(new Set([...preferred, ...all]));
+
+  const integrationId = (env?.INTEGRATION_ID || '').trim();
+
+  const scored = merged
+    .filter((id) => id && id !== integrationId)
+    .map((id) => {
+      let score = 0;
+      if (id === lastVisitorId) score += 100;
+      if (/^visitor[-_]/i.test(id)) score += 30;
+      if (id === payload?.metadata?.visitorId) score += 20;
+      if (id === payload?.event?.metadata?.visitorId) score += 20;
+      if (id === payload?.body?.metadata?.visitorId) score += 20;
+      if (id === payload?.channel?.to?.id) score += 15;
+      if (id === payload?.event?.channel?.to?.id) score += 15;
+      if (id === payload?.body?.channel?.to?.id) score += 15;
+      return { id, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const picked = scored.map((s) => s.id);
+  if (picked.length > 0) return picked;
+  if (lastVisitorId) return [lastVisitorId];
+  return [];
+}
+
 async function getAccessToken(env) {
   if (!env.GENESYS_CLIENT_ID || !env.GENESYS_CLIENT_SECRET) {
     throw new Error('Missing Worker secrets: GENESYS_CLIENT_ID or GENESYS_CLIENT_SECRET');
@@ -690,17 +719,8 @@ async function handleGenesysWebhook(request, env) {
             }
 
             const agentName = extractAgentDisplayName(body);
-
-            const candidates = collectOutboundTargetVisitorIds(body);
-            if (candidates.length === 0) {
-              const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
-              if (lastVisitorId) candidates.push(lastVisitorId);
-            }
-
-            if (candidates.length === 0) {
-              const fallbackCandidates = collectCandidateVisitorIds(body);
-              for (const v of fallbackCandidates) candidates.push(v);
-            }
+            const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+            const candidates = resolveOutboundVisitorIds(body, env, lastVisitorId);
 
             if (candidates.length === 0) {
               await env.MESSAGES.put('__orphanWebhook', JSON.stringify({
@@ -712,6 +732,7 @@ async function handleGenesysWebhook(request, env) {
               const appendResult = {
                 at: new Date().toISOString(),
                 candidates,
+                lastVisitorId: lastVisitorId || null,
                 appended: [],
                 failed: []
               };
