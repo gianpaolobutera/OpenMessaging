@@ -547,68 +547,6 @@ async function getAccessToken(env) {
     return data.access_token;
 }
 
-async function sendInitialConversationEvent(env, token, visitorId, eventId, at, attributes) {
-  const eventPayloadVariants = [
-    {
-      label: 'open-event-custom',
-      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`,
-      payload: {
-        channel: {
-          platform: 'Open',
-          type: 'Private',
-          messageId: eventId,
-          to: { id: env.INTEGRATION_ID },
-          from: { id: visitorId, idType: 'Opaque' },
-          time: at
-        },
-        type: 'Event',
-        event: {
-          eventType: 'Custom',
-          custom: {
-            name: 'ConversationStart',
-            attributes
-          }
-        }
-      }
-    },
-    {
-      label: 'open-message-event',
-      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`,
-      payload: {
-        channel: {
-          messageId: eventId,
-          from: { id: visitorId, idType: 'Opaque' },
-          time: at
-        },
-        type: 'Event',
-        direction: 'Inbound',
-        event: {
-          eventType: 'ConversationStart',
-          attributes
-        }
-      }
-    }
-  ];
-
-  const attempts = [];
-  for (const variant of eventPayloadVariants) {
-    const res = await fetch(variant.endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(variant.payload)
-    });
-
-    const bodyText = await res.text();
-    attempts.push({ label: variant.label, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
-    if (res.ok) return { ok: true, attempts };
-  }
-
-  return { ok: false, attempts };
-}
-
 async function handleSendToGenesys(request, env) {
     try {
     const rawBody = await request.text();
@@ -661,85 +599,27 @@ async function handleSendToGenesys(request, env) {
           { label: 'base', payload }
         ];
         if (isFirstCustomerEvent) {
-          const flat = {
-            visitorId,
-            channel: participantData.channel,
-            uiVersion: participantData.uiVersion,
-            conversationStartAt: participantData.conversationStartAt
-          };
-          const attrs = (participantAttributes && typeof participantAttributes === 'object')
+          const customAttributes = (participantAttributes && typeof participantAttributes === 'object')
             ? participantAttributes
             : {
-                customerId: visitorId,
-                tier: 'standard',
-                language: 'en',
-                isVip: 'false',
-                uiVersion: UI_VERSION
+                visitorId,
+                channel: participantData.channel,
+                uiVersion: participantData.uiVersion,
+                conversationStartAt: participantData.conversationStartAt
               };
 
-          const startEventId = `${visitorId}-start-${crypto.randomUUID()}`;
-          try {
-            const initialEventResult = await sendInitialConversationEvent(
-              env,
-              token,
-              visitorId,
-              startEventId,
-              now,
-              attrs
-            );
-            await env.MESSAGES.put('__lastInitialEventSend', JSON.stringify({
-              at: now,
-              visitorId,
-              eventId: startEventId,
-              ok: initialEventResult.ok,
-              attempts: initialEventResult.attempts
-            }), { expirationTtl: 3600 });
-          } catch (e) {
-            await env.MESSAGES.put('__lastInitialEventSend', JSON.stringify({
-              at: now,
-              visitorId,
-              eventId: startEventId,
-              ok: false,
-              error: e.message
-            }), { expirationTtl: 3600 });
-          }
-
+          // Keep only the accepted first-message enrichment path for deterministic behavior.
           payloadVariants = [
-            {
-              label: 'context.participant.attributes',
-              payload: {
-                eventType: 'message',
-                channel: {
-                  platform: 'Open',
-                  type: 'Private',
-                  messageId,
-                  to: { id: env.INTEGRATION_ID },
-                  from: { id: visitorId, idType: 'Opaque' },
-                  time: now
-                },
-                message: {
-                  id: messageId,
-                  type: 'Text',
-                  text,
-                  direction: 'Inbound',
-                  timestamp: now
-                },
-                context: {
-                  participant: {
-                    id: visitorId,
-                    attributes: attrs
-                  }
-                }
-              }
-            },
-            { label: 'channel.customAttributes', payload: { ...payload, channel: { ...payload.channel, customAttributes: flat } } },
-            { label: 'channel.metadata.customAttributes', payload: { ...payload, channel: { ...payload.channel, metadata: { customAttributes: flat } } } },
-            { label: 'metadata.customAttributes', payload: { ...payload, metadata: { customAttributes: flat } } },
-            { label: 'metadata', payload: { ...payload, metadata: flat } },
-            { label: 'customAttributes', payload: { ...payload, customAttributes: flat } },
-            { label: 'channel.metadata', payload: { ...payload, channel: { ...payload.channel, metadata: flat } } },
+            { label: 'channel.customAttributes', payload: { ...payload, channel: { ...payload.channel, customAttributes } } },
             { label: 'base', payload }
           ];
+
+          await env.MESSAGES.put('__lastInitialEventSend', JSON.stringify({
+            at: now,
+            visitorId,
+            skipped: true,
+            reason: 'disabled-explicit-initial-event; using channel.customAttributes on first message'
+          }), { expirationTtl: 3600 });
         }
 
         let genesysResponse = null;
