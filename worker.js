@@ -559,7 +559,7 @@ async function handleSendToGenesys(request, env) {
       body = JSON.parse(normalized);
     }
 
-        const { text, visitorId } = body;
+        const { text, visitorId, seedParticipantData } = body;
     if (!text || !visitorId) {
       return new Response('Missing required fields: text, visitorId', { status: 400 });
     }
@@ -572,7 +572,8 @@ async function handleSendToGenesys(request, env) {
         await env.MESSAGES.put('__lastVisitorId', visitorId, { expirationTtl: 3600 });
         await setTypingState(env, visitorId, false, 'customer');
         const firstEventMarkerKey = `__convInit:${visitorId}`;
-        const isFirstCustomerEvent = !(await env.MESSAGES.get(firstEventMarkerKey));
+        const markerExists = Boolean(await env.MESSAGES.get(firstEventMarkerKey));
+        const isFirstCustomerEvent = Boolean(seedParticipantData) || !markerExists;
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
 
@@ -643,7 +644,7 @@ async function handleSendToGenesys(request, env) {
 
         if (genesysResponse && genesysResponse.ok) {
           if (isFirstCustomerEvent) {
-            await env.MESSAGES.put(firstEventMarkerKey, now, { expirationTtl: 86400 });
+            await env.MESSAGES.put(firstEventMarkerKey, now, { expirationTtl: 1800 });
             await env.MESSAGES.put('__lastParticipantDataSeed', JSON.stringify({
               at: now,
               visitorId,
@@ -928,6 +929,7 @@ async function handleDebugWebhook(env) {
   const lastDisconnectEvent = await env.MESSAGES.get('__lastDisconnectEvent');
   const lastCustomerTypingSend = await env.MESSAGES.get('__lastCustomerTypingSend');
   const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
+  const lastFirstEventSeedAttempts = await env.MESSAGES.get('__lastFirstEventSeedAttempts');
 
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
@@ -942,6 +944,7 @@ async function handleDebugWebhook(env) {
     lastDisconnectEvent: lastDisconnectEvent ? JSON.parse(lastDisconnectEvent) : null,
     lastCustomerTypingSend: lastCustomerTypingSend ? JSON.parse(lastCustomerTypingSend) : null,
     lastWebhookAuthFailure: lastWebhookAuthFailure ? JSON.parse(lastWebhookAuthFailure) : null,
+    lastFirstEventSeedAttempts: lastFirstEventSeedAttempts ? JSON.parse(lastFirstEventSeedAttempts) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
     headers: { 'Content-Type': 'application/json' }
@@ -1094,6 +1097,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   let typingTimer = null;
   let connected = false;
   let localTypingSent = false;
+  let hasSentCustomerMessage = false;
 
   function autoResize(el) {
     el.style.height = 'auto';
@@ -1167,9 +1171,10 @@ const PAGE_HTML = `<!DOCTYPE html>
       const res = await fetch('/send-to-genesys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, visitorId })
+        body: JSON.stringify({ text, visitorId, seedParticipantData: !hasSentCustomerMessage })
       });
       if (res.ok) {
+        hasSentCustomerMessage = true;
         setStatus('Message sent · Waiting for agent reply…');
         await sendTyping(false);
       } else {
