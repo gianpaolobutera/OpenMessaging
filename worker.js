@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-07.1';
+const UI_VERSION = '2026-04-07.2';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 
@@ -486,6 +486,29 @@ function resolveOutboundVisitorIds(payload, env, lastVisitorId) {
   return [];
 }
 
+function isDisconnectLikeWebhook(payload) {
+  const values = [
+    payload?.type,
+    payload?.status,
+    payload?.eventType,
+    payload?.event?.eventType,
+    payload?.body?.eventType,
+    payload?.body?.event?.eventType,
+    payload?.event?.type,
+    payload?.body?.event?.type
+  ]
+    .filter((v) => typeof v === 'string')
+    .map((v) => v.toLowerCase());
+
+  return values.some((v) =>
+    v.includes('disconnect') ||
+    v.includes('disconnected') ||
+    v.includes('terminate') ||
+    v.includes('ended') ||
+    v.includes('closed')
+  );
+}
+
 async function getAccessToken(env) {
   if (!env.GENESYS_CLIENT_ID || !env.GENESYS_CLIENT_SECRET) {
     throw new Error('Missing Worker secrets: GENESYS_CLIENT_ID or GENESYS_CLIENT_SECRET');
@@ -749,6 +772,36 @@ async function handleGenesysWebhook(request, env) {
             }
         }
 
+        const disconnectLike = isDisconnectLikeWebhook(body);
+        if (disconnectLike && !text) {
+            if (!env.MESSAGES) {
+              return new Response('Missing KV binding: MESSAGES', { status: 500 });
+            }
+
+            const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+            const candidates = resolveOutboundVisitorIds(body, env, lastVisitorId);
+            if (candidates.length > 0) {
+              const agentName = extractAgentDisplayName(body);
+              for (const visitorId of candidates) {
+                await appendReplyWithName(
+                  env,
+                  visitorId,
+                  `${agentName} disconnected the interaction.`,
+                  'System'
+                );
+                await setTypingState(env, visitorId, false, 'agent', 60);
+              }
+              await env.MESSAGES.put('__lastDisconnectEvent', JSON.stringify({
+                at: new Date().toISOString(),
+                candidates,
+                msgType,
+                eventType,
+                status: body?.status || null,
+                direction
+              }), { expirationTtl: 3600 });
+            }
+        }
+
         await env.MESSAGES.put('__lastWebhookTyping', JSON.stringify({
           at: new Date().toISOString(),
           direction,
@@ -790,6 +843,7 @@ async function handleDebugWebhook(env) {
   const lastOutboundWebhookEvent = await env.MESSAGES.get('__lastOutboundWebhookEvent');
   const lastOutboundTextWebhook = await env.MESSAGES.get('__lastOutboundTextWebhook');
   const lastAppendResult = await env.MESSAGES.get('__lastAppendResult');
+  const lastDisconnectEvent = await env.MESSAGES.get('__lastDisconnectEvent');
   const lastCustomerTypingSend = await env.MESSAGES.get('__lastCustomerTypingSend');
   const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
 
@@ -803,6 +857,7 @@ async function handleDebugWebhook(env) {
     lastOutboundWebhookEvent: lastOutboundWebhookEvent ? JSON.parse(lastOutboundWebhookEvent) : null,
     lastOutboundTextWebhook: lastOutboundTextWebhook ? JSON.parse(lastOutboundTextWebhook) : null,
     lastAppendResult: lastAppendResult ? JSON.parse(lastAppendResult) : null,
+    lastDisconnectEvent: lastDisconnectEvent ? JSON.parse(lastDisconnectEvent) : null,
     lastCustomerTypingSend: lastCustomerTypingSend ? JSON.parse(lastCustomerTypingSend) : null,
     lastWebhookAuthFailure: lastWebhookAuthFailure ? JSON.parse(lastWebhookAuthFailure) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
