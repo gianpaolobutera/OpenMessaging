@@ -547,6 +547,67 @@ async function getAccessToken(env) {
     return data.access_token;
 }
 
+async function sendInitialConversationEvent(env, token, visitorId, eventId, at, attributes) {
+  const eventPayloadVariants = [
+    {
+      label: 'open-event-custom',
+      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`,
+      payload: {
+        channel: {
+          platform: 'Open',
+          type: 'Private',
+          messageId: eventId,
+          from: { id: visitorId, idType: 'Opaque' },
+          time: at
+        },
+        type: 'Event',
+        event: {
+          eventType: 'Custom',
+          custom: {
+            name: 'ConversationStart',
+            attributes
+          }
+        }
+      }
+    },
+    {
+      label: 'open-message-event',
+      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`,
+      payload: {
+        channel: {
+          messageId: eventId,
+          from: { id: visitorId, idType: 'Opaque' },
+          time: at
+        },
+        type: 'Event',
+        direction: 'Inbound',
+        event: {
+          eventType: 'ConversationStart',
+          attributes
+        }
+      }
+    }
+  ];
+
+  const attempts = [];
+  for (const variant of eventPayloadVariants) {
+    const res = await fetch(variant.endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(variant.payload)
+    });
+
+    const bodyText = await res.text();
+    attempts.push({ label: variant.label, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
+    if (res.ok) return { ok: true, attempts };
+  }
+
+  return { ok: false, attempts };
+}
+
 async function handleSendToGenesys(request, env) {
     try {
     const rawBody = await request.text();
@@ -614,6 +675,33 @@ async function handleSendToGenesys(request, env) {
                 isVip: 'false',
                 uiVersion: UI_VERSION
               };
+
+          const startEventId = `${visitorId}-start-${crypto.randomUUID()}`;
+          try {
+            const initialEventResult = await sendInitialConversationEvent(
+              env,
+              token,
+              visitorId,
+              startEventId,
+              now,
+              attrs
+            );
+            await env.MESSAGES.put('__lastInitialEventSend', JSON.stringify({
+              at: now,
+              visitorId,
+              eventId: startEventId,
+              ok: initialEventResult.ok,
+              attempts: initialEventResult.attempts
+            }), { expirationTtl: 3600 });
+          } catch (e) {
+            await env.MESSAGES.put('__lastInitialEventSend', JSON.stringify({
+              at: now,
+              visitorId,
+              eventId: startEventId,
+              ok: false,
+              error: e.message
+            }), { expirationTtl: 3600 });
+          }
 
           payloadVariants = [
             {
@@ -968,6 +1056,8 @@ async function handleDebugWebhook(env) {
   const lastCustomerTypingSend = await env.MESSAGES.get('__lastCustomerTypingSend');
   const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
   const lastFirstEventSeedAttempts = await env.MESSAGES.get('__lastFirstEventSeedAttempts');
+  const lastInitialEventSend = await env.MESSAGES.get('__lastInitialEventSend');
+  const lastParticipantDataSeed = await env.MESSAGES.get('__lastParticipantDataSeed');
 
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
@@ -983,6 +1073,8 @@ async function handleDebugWebhook(env) {
     lastCustomerTypingSend: lastCustomerTypingSend ? JSON.parse(lastCustomerTypingSend) : null,
     lastWebhookAuthFailure: lastWebhookAuthFailure ? JSON.parse(lastWebhookAuthFailure) : null,
     lastFirstEventSeedAttempts: lastFirstEventSeedAttempts ? JSON.parse(lastFirstEventSeedAttempts) : null,
+    lastInitialEventSend: lastInitialEventSend ? JSON.parse(lastInitialEventSend) : null,
+    lastParticipantDataSeed: lastParticipantDataSeed ? JSON.parse(lastParticipantDataSeed) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
     headers: { 'Content-Type': 'application/json' }
