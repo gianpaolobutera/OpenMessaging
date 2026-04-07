@@ -474,15 +474,27 @@ function collectOutboundTargetVisitorIds(payload) {
 function resolveOutboundVisitorIds(payload, env, lastVisitorId) {
   const preferred = collectOutboundTargetVisitorIds(payload);
   const all = collectCandidateVisitorIds(payload);
-  const merged = Array.from(new Set([...preferred, ...all]));
-
   const integrationId = (env?.INTEGRATION_ID || '').trim();
+  const normalizedLastVisitorId = typeof lastVisitorId === 'string' ? lastVisitorId.trim() : '';
 
+  const preferredFiltered = preferred.filter((id) => id && id !== integrationId);
+  if (preferredFiltered.length > 0) {
+    if (normalizedLastVisitorId && preferredFiltered.includes(normalizedLastVisitorId)) {
+      return [normalizedLastVisitorId, ...preferredFiltered.filter((id) => id !== normalizedLastVisitorId)];
+    }
+    return preferredFiltered;
+  }
+
+  // When outbound payload is ambiguous, stick to the active chat visitor instead of agent/system ids.
+  if (normalizedLastVisitorId) {
+    return [normalizedLastVisitorId];
+  }
+
+  const merged = Array.from(new Set(all));
   const scored = merged
     .filter((id) => id && id !== integrationId)
     .map((id) => {
       let score = 0;
-      if (id === lastVisitorId) score += 100;
       if (/^visitor[-_]/i.test(id)) score += 30;
       if (id === payload?.metadata?.visitorId) score += 20;
       if (id === payload?.event?.metadata?.visitorId) score += 20;
@@ -496,7 +508,6 @@ function resolveOutboundVisitorIds(payload, env, lastVisitorId) {
 
   const picked = scored.map((s) => s.id);
   if (picked.length > 0) return picked;
-  if (lastVisitorId) return [lastVisitorId];
   return [];
 }
 
