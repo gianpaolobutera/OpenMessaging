@@ -2,7 +2,7 @@
 // Secrets in Cloudflare dashboard: GENESYS_CLIENT_ID, GENESYS_CLIENT_SECRET, INTEGRATION_ID
 // KV binding in Cloudflare dashboard: MESSAGES
 
-const UI_VERSION = '2026-04-07.2';
+const UI_VERSION = '2026-04-07.3';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 
@@ -198,6 +198,13 @@ async function validateWebhookSignature(rawBody, signatureHeader, secret) {
     constantTimeEqual(expectedBase64, candidate) ||
     constantTimeEqual(expectedBase64Url, candidate)
   );
+}
+
+function validateDataActionSecret(request, env) {
+  const expected = (env.DATA_ACTION_SHARED_SECRET || '').trim();
+  if (!expected) return false;
+  const provided = (request.headers.get('X-Webhook-Key') || '').trim();
+  return provided && constantTimeEqual(expected, provided);
 }
 
 async function getTypingState(env, visitorId) {
@@ -636,18 +643,25 @@ async function handleSendTypingToGenesys(request, env) {
 
 async function handleGenesysWebhook(request, env) {
     try {
-        if (!env.GENESYS_WEBHOOK_SECRET) {
-          return new Response('Missing Worker secret: GENESYS_WEBHOOK_SECRET', { status: 500 });
-        }
-
         const signatureHeader = request.headers.get('X-Hub-Signature-256');
         const rawBody = await request.text();
-        const validSignature = await validateWebhookSignature(rawBody, signatureHeader, env.GENESYS_WEBHOOK_SECRET);
-        if (!validSignature) {
+        let authMode = null;
+
+        if (env.GENESYS_WEBHOOK_SECRET) {
+          const validSignature = await validateWebhookSignature(rawBody, signatureHeader, env.GENESYS_WEBHOOK_SECRET);
+          if (validSignature) authMode = 'hmac';
+        }
+
+        if (!authMode && validateDataActionSecret(request, env)) {
+          authMode = 'data-action-secret';
+        }
+
+        if (!authMode) {
           if (env.MESSAGES) {
             await env.MESSAGES.put('__lastWebhookAuthFailure', JSON.stringify({
               at: new Date().toISOString(),
               hasSignatureHeader: Boolean(signatureHeader),
+              hasDataActionHeader: Boolean(request.headers.get('X-Webhook-Key')),
               signaturePrefix: signatureHeader ? signatureHeader.slice(0, 24) : null,
               bodyLength: rawBody.length
             }), { expirationTtl: 3600 });
@@ -685,6 +699,7 @@ async function handleGenesysWebhook(request, env) {
         if (env.MESSAGES) {
           await env.MESSAGES.put('__lastWebhookEvent', JSON.stringify({
             at: new Date().toISOString(),
+            authMode,
             direction,
             msgType,
             eventType,
@@ -700,6 +715,7 @@ async function handleGenesysWebhook(request, env) {
           if (outboundLike) {
             await env.MESSAGES.put('__lastOutboundWebhookEvent', JSON.stringify({
               at: new Date().toISOString(),
+              authMode,
               direction,
               msgType,
               eventType,
@@ -714,6 +730,7 @@ async function handleGenesysWebhook(request, env) {
           if (outboundLike && text) {
             await env.MESSAGES.put('__lastOutboundTextWebhook', JSON.stringify({
               at: new Date().toISOString(),
+              authMode,
               direction,
               msgType,
               eventType,
@@ -889,9 +906,10 @@ async function handleHealthConfig(env) {
   const hasClientSecret = Boolean(env.GENESYS_CLIENT_SECRET);
   const hasIntegrationId = Boolean(env.INTEGRATION_ID);
   const hasWebhookSecret = Boolean(env.GENESYS_WEBHOOK_SECRET);
+  const hasDataActionSharedSecret = Boolean(env.DATA_ACTION_SHARED_SECRET);
   const hasMessagesKv = Boolean(env.MESSAGES);
 
-  const ok = hasClientId && hasClientSecret && hasIntegrationId && hasWebhookSecret && hasMessagesKv;
+  const ok = hasClientId && hasClientSecret && hasIntegrationId && hasMessagesKv;
 
   return new Response(JSON.stringify({
     ok,
@@ -902,6 +920,7 @@ async function handleHealthConfig(env) {
       hasClientSecret,
       hasIntegrationId,
       hasWebhookSecret,
+      hasDataActionSharedSecret,
       hasMessagesKv
     }
   }), {
