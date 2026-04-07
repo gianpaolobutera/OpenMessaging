@@ -604,6 +604,9 @@ async function handleSendToGenesys(request, env) {
             conversationStartAt: participantData.conversationStartAt
           };
           payloadVariants.unshift(
+            { ...payload, channel: { ...payload.channel, customAttributes: flat } },
+            { ...payload, channel: { ...payload.channel, metadata: { customAttributes: flat } } },
+            { ...payload, metadata: { customAttributes: flat } },
             { ...payload, metadata: flat },
             { ...payload, customAttributes: flat },
             { ...payload, channel: { ...payload.channel, metadata: flat } }
@@ -645,10 +648,13 @@ async function handleSendToGenesys(request, env) {
         if (genesysResponse && genesysResponse.ok) {
           if (isFirstCustomerEvent) {
             await env.MESSAGES.put(firstEventMarkerKey, now, { expirationTtl: 1800 });
+            const successAttempt = attemptLog.find((a) => a.ok) || null;
             await env.MESSAGES.put('__lastParticipantDataSeed', JSON.stringify({
               at: now,
               visitorId,
-              participantData
+              participantData,
+              successVariant: successAttempt ? successAttempt.variant : null,
+              attemptsCount: attemptLog.length
             }), { expirationTtl: 3600 });
           }
           return new Response('OK', { status: 200 });
