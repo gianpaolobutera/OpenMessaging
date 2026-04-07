@@ -557,6 +557,7 @@ async function sendInitialConversationEvent(env, token, visitorId, eventId, at, 
           platform: 'Open',
           type: 'Private',
           messageId: eventId,
+          to: { id: env.INTEGRATION_ID },
           from: { id: visitorId, idType: 'Opaque' },
           time: at
         },
@@ -709,9 +710,12 @@ async function handleSendToGenesys(request, env) {
               payload: {
                 eventType: 'message',
                 channel: {
-                  type: 'Open',
+                  platform: 'Open',
+                  type: 'Private',
+                  messageId,
                   to: { id: env.INTEGRATION_ID },
-                  from: { id: visitorId, idType: 'opaque' }
+                  from: { id: visitorId, idType: 'Opaque' },
+                  time: now
                 },
                 message: {
                   id: messageId,
