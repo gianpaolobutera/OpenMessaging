@@ -803,7 +803,9 @@ async function handleSendToGenesys(request, env) {
             await safeKvPut(env, conversationIdKey, prefetchedConversationId, { expirationTtl: LAR_THREADING_TTL_SECONDS });
           }
           if (isFirstCustomerEvent) {
-            await safeKvPut(env, firstEventMarkerKey, now, { expirationTtl: 1800 });
+            // Keep first-message marker for the full threading window so re-chats don't get forced
+            // into first-message logic while still inside the LAR timeline.
+            await safeKvPut(env, firstEventMarkerKey, now, { expirationTtl: LAR_THREADING_TTL_SECONDS });
             const successAttempt = attemptLog.find((a) => a.ok) || null;
             await safeKvPut(env, '__lastParticipantDataSeed', JSON.stringify({
               at: now,
@@ -1050,11 +1052,6 @@ async function handleGenesysWebhook(request, env) {
                   'System'
                 );
                 await setTypingState(env, visitorId, false, 'agent', 60);
-                try {
-                  await kvDelete(env, `__convId:${visitorId}`);
-                  await kvDelete(env, `__convInit:${visitorId}`);
-                } catch {
-                }
               }
               await safeKvPut(env, '__lastDisconnectEvent', JSON.stringify({
                 at: new Date().toISOString(),
