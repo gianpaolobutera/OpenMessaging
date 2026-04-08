@@ -252,117 +252,55 @@ async function getTypingState(env, visitorId) {
 
 async function postTypingEventToGenesys(env, token, visitorId) {
   const now = new Date().toISOString();
-  const eventId = `${visitorId}-typing-${crypto.randomUUID()}`;
+  const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`;
+  const payload = {
+    channel: {
+      from: {
+        id: visitorId,
+        idType: 'Opaque'
+      },
+      time: now
+    },
+    events: [
+      {
+        eventType: 'Typing'
+      }
+    ]
+  };
 
-  const typingPayloadVariants = [
-    {
-      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`,
-      payload: {
-        channel: {
-          platform: 'Open',
-          type: 'Open',
-          messageId: eventId,
-          to: { id: env.INTEGRATION_ID },
-          from: { id: visitorId },
-          time: now
-        },
-        type: 'Event',
-        event: {
-          eventType: 'Typing',
-          typing: {
-            type: 'On'
-          }
-        }
-      },
-      label: 'open-event-integration-user-payload'
-    },
-    {
-      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/inbound/open/event`,
-      payload: {
-        channel: {
-          platform: 'Open',
-          type: 'Private',
-          messageId: eventId,
-          to: { id: env.INTEGRATION_ID },
-          from: { id: visitorId, idType: 'Opaque' },
-          time: now
-        },
-        type: 'Event',
-        event: { eventType: 'Typing' }
-      },
-      label: 'open-event-global'
-    },
-    {
-      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`,
-      payload: {
-        channel: {
-          platform: 'Open',
-          type: 'Private',
-          messageId: eventId,
-          from: { id: visitorId, idType: 'Opaque' },
-          time: now
-        },
-        type: 'Event',
-        event: { eventType: 'Typing' }
-      },
-      label: 'open-event-integration'
-    },
-    {
-      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`,
-      payload: {
-        channel: {
-          messageId: eventId,
-          from: { id: visitorId, idType: 'Opaque' },
-          time: now
-        },
-        type: 'Event',
-        direction: 'Inbound',
-        event: { eventType: 'Typing' }
-      },
-      label: 'open-message-event'
-    },
-    {
-      endpoint: `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`,
-      payload: {
-        channel: {
-          messageId: eventId,
-          from: { id: visitorId, idType: 'Opaque' },
-          time: now
-        },
-        direction: 'Inbound',
-        eventType: 'Typing',
-        typing: { state: 'On' }
-      },
-      label: 'open-message-typing-state'
-    }
-  ];
-
-  const attempts = [];
-  for (const variant of typingPayloadVariants) {
-    if (!variant.endpoint.includes('/undefined/')) {
-      const endpoint = variant.endpoint;
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(variant.payload)
-    });
-
-    const bodyText = await res.text();
-      attempts.push({
-        label: variant.label,
+  if (endpoint.includes('/undefined/')) {
+    return {
+      ok: false,
+      attempts: [{
+        label: 'open-event-integration',
         endpoint,
-        status: res.status,
-        ok: res.ok,
-        body: bodyText.slice(0, 500)
-      });
-    if (res.ok) return { ok: true, attempts };
-    }
+        status: 0,
+        ok: false,
+        body: 'Missing INTEGRATION_ID'
+      }]
+    };
   }
 
-  return { ok: false, attempts };
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const bodyText = await res.text();
+  return {
+    ok: res.ok,
+    attempts: [{
+      label: 'open-event-integration',
+      endpoint,
+      status: res.status,
+      ok: res.ok,
+      body: bodyText.slice(0, 500)
+    }]
+  };
 }
 
 function extractTypingState(payload) {
