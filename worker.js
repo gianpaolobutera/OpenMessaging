@@ -178,17 +178,36 @@ async function appendReplyWithName(env, visitorId, text, agentName) {
   await safeKvPut(env, visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
 }
 
-async function setTypingState(env, visitorId, isTyping, source, ttlSeconds = 120) {
+async function setTypingState(env, visitorId, isTyping, source, ttlSeconds = 120, durationMs = null) {
   const safeTtl = Math.max(MIN_KV_TTL_SECONDS, Number(ttlSeconds) || 0);
   const payload = {
     isTyping: Boolean(isTyping),
     source: source || 'unknown',
     at: new Date().toISOString()
   };
+  if (Number.isFinite(Number(durationMs)) && Number(durationMs) > 0) {
+    payload.durationMs = Number(durationMs);
+  }
   await safeKvPut(env, `__typing:${visitorId}`, JSON.stringify(payload), { expirationTtl: safeTtl });
 }
 
 function matchesTypingEvent(payload) {
+  const eventLists = [
+    payload?.events,
+    payload?.event?.events,
+    payload?.body?.events,
+    payload?.body?.event?.events
+  ];
+
+  for (const list of eventLists) {
+    if (!Array.isArray(list)) continue;
+    for (const event of list) {
+      if (typeof event?.eventType === 'string' && event.eventType.toLowerCase() === 'typing') {
+        return true;
+      }
+    }
+  }
+
   const typeCandidates = [
     payload?.type,
     payload?.event?.type,
@@ -293,7 +312,11 @@ async function getTypingState(env, visitorId) {
     const parsed = JSON.parse(raw);
     if (parsed && parsed.isTyping && parsed.source === 'agent' && parsed.at) {
       const ageMs = Date.now() - Date.parse(parsed.at);
-      if (Number.isFinite(ageMs) && ageMs > AGENT_TYPING_UI_WINDOW_SECONDS * 1000) {
+      const configuredWindowMs = AGENT_TYPING_UI_WINDOW_SECONDS * 1000;
+      const effectiveWindowMs = Number.isFinite(Number(parsed.durationMs))
+        ? Math.max(1000, Number(parsed.durationMs))
+        : configuredWindowMs;
+      if (Number.isFinite(ageMs) && ageMs > effectiveWindowMs) {
         return { isTyping: false, source: 'agent', at: parsed.at, expired: true };
       }
     }
@@ -303,14 +326,15 @@ async function getTypingState(env, visitorId) {
   }
 }
 
-async function postTypingEventToGenesys(env, token, visitorId) {
+async function postTypingEventToGenesys(env, token, visitorId, visitorNickname) {
   const now = new Date().toISOString();
   const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`;
   const payload = {
     channel: {
       from: {
         id: visitorId,
-        idType: 'Opaque'
+        idType: 'Opaque',
+        nickname: visitorNickname || 'Customer'
       },
       time: now
     },
@@ -357,10 +381,32 @@ async function postTypingEventToGenesys(env, token, visitorId) {
 }
 
 function extractTypingState(payload) {
+  const eventLists = [
+    payload?.events,
+    payload?.event?.events,
+    payload?.body?.events,
+    payload?.body?.event?.events
+  ];
+
+  for (const list of eventLists) {
+    if (!Array.isArray(list)) continue;
+    for (const event of list) {
+      if (typeof event?.eventType === 'string' && event.eventType.toLowerCase() === 'typing') {
+        const typeRaw = event?.typing?.type || event?.typing?.state || 'On';
+        const normalizedType = String(typeRaw).toLowerCase();
+        if (['off', 'stop', 'stopped', 'false', 'idle'].includes(normalizedType)) return false;
+        return true;
+      }
+    }
+  }
+
   const raw =
     payload?.typing?.state ||
+    payload?.typing?.type ||
     payload?.event?.typing?.state ||
+    payload?.event?.typing?.type ||
     payload?.body?.typing?.state ||
+    payload?.body?.typing?.type ||
     payload?.typingState ||
     payload?.event?.typingState ||
     payload?.body?.typingState ||
@@ -390,6 +436,29 @@ function extractTypingState(payload) {
   ) {
     return false;
   }
+  return null;
+}
+
+function extractTypingDurationMs(payload) {
+  const eventLists = [
+    payload?.events,
+    payload?.event?.events,
+    payload?.body?.events,
+    payload?.body?.event?.events
+  ];
+
+  for (const list of eventLists) {
+    if (!Array.isArray(list)) continue;
+    for (const event of list) {
+      if (typeof event?.eventType === 'string' && event.eventType.toLowerCase() === 'typing') {
+        const duration = Number(event?.typing?.duration);
+        if (Number.isFinite(duration) && duration > 0) {
+          return Math.max(1000, Math.min(60000, duration));
+        }
+      }
+    }
+  }
+
   return null;
 }
 
@@ -702,7 +771,7 @@ async function handleSendToGenesys(request, env) {
 async function handleSendTypingToGenesys(request, env) {
     try {
       const body = await request.json();
-      const { visitorId, isTyping } = body || {};
+      const { visitorId, isTyping, visitorNickname } = body || {};
 
       if (!visitorId || typeof isTyping !== 'boolean') {
         return new Response('Missing required fields: visitorId, isTyping(boolean)', { status: 400 });
@@ -728,7 +797,7 @@ async function handleSendTypingToGenesys(request, env) {
 
       try {
         const token = await getAccessToken(env);
-        const result = await postTypingEventToGenesys(env, token, visitorId);
+        const result = await postTypingEventToGenesys(env, token, visitorId, visitorNickname);
         await safeKvPut(env, '__lastCustomerTypingSend', JSON.stringify({
           at: new Date().toISOString(),
           visitorId,
@@ -780,6 +849,7 @@ async function handleGenesysWebhook(request, env) {
         const eventType = (body.event?.eventType || body.eventType || body.body?.event?.eventType || '').toString().toLowerCase();
         const { text, textPath } = extractWebhookText(body);
         const typingState = extractTypingState(body);
+        const typingDurationMs = extractTypingDurationMs(body);
         const typingEvent = matchesTypingEvent(body);
         const textLikeEvent = msgType === 'text' || eventType === 'message' || Boolean(text);
         const outboundLike = direction === 'Outbound' || textLikeEvent || typingEvent;
@@ -812,6 +882,7 @@ async function handleGenesysWebhook(request, env) {
             bodyKeys: Object.keys(body || {}),
             typingRaw,
             typingState,
+            typingDurationMs,
             candidateCount
           }), { expirationTtl: 3600 });
 
@@ -825,6 +896,7 @@ async function handleGenesysWebhook(request, env) {
               hasText: Boolean(text),
               textPath,
               candidateCount,
+              typingDurationMs,
               channelFromId: body?.channel?.from?.id || null,
               channelToId: body?.channel?.to?.id || null
             }), { expirationTtl: 3600 });
@@ -850,9 +922,19 @@ async function handleGenesysWebhook(request, env) {
               const lastVisitorId = await kvGet(env, '__lastVisitorId');
               if (lastVisitorId) typingCandidates.push(lastVisitorId);
             }
+            const isAgentTyping = typingState == null ? true : typingState;
+            const typingTtlSeconds = isAgentTyping
+              ? Math.max(5, Math.ceil((typingDurationMs || 5000) / 1000))
+              : 60;
             for (const visitorId of typingCandidates) {
-              // Outbound typing is ephemeral: expire automatically if no follow-up typing event arrives.
-              await setTypingState(env, visitorId, true, 'agent', 8);
+              await setTypingState(
+                env,
+                visitorId,
+                isAgentTyping,
+                'agent',
+                typingTtlSeconds,
+                isAgentTyping ? (typingDurationMs || 5000) : null
+              );
             }
         }
 
@@ -933,6 +1015,7 @@ async function handleGenesysWebhook(request, env) {
           bodyKeys: Object.keys(body || {}),
           typingRaw,
           typingState,
+          typingDurationMs,
           candidateCount
         }), { expirationTtl: 3600 });
 
@@ -1280,7 +1363,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       await fetch('/send-typing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visitorId, isTyping })
+        body: JSON.stringify({ visitorId, isTyping, visitorNickname: 'Web Customer' })
       });
     } catch { }
   }
