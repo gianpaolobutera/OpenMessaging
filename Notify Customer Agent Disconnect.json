@@ -1,0 +1,63 @@
+{
+  "name": "Notify Customer Agent Disconnect - Exported 2026-04-07 @ 19:59",
+  "integrationType": "custom-rest-actions",
+  "actionType": "custom",
+  "config": {
+    "request": {
+      "requestUrlTemplate": "https://openmess.gianpa-but.workers.dev/genesys-webhook",
+      "requestType": "POST",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Webhook-Key": "${credentials.dataActionSharedSecret}"
+      },
+      "requestTemplate": "{\n  \"type\": \"Event\",\n  \"direction\": \"Outbound\",\n  \"event\": {\n    \"eventType\": \"AgentDisconnected\"\n  },\n  \"channel\": {\n    \"to\": {\n      \"id\": \"${input.visitorId}\"\n    },\n    \"from\": {\n      \"id\": \"${input.agentId}\",\n      \"nickname\": \"${input.agentName}\"\n    },\n    \"time\": \"${input.timestamp}\"\n  },\n  \"metadata\": {\n    \"visitorId\": \"${input.visitorId}\",\n    \"conversationId\": \"${input.conversationId}\"\n  }\n}"
+    },
+    "response": {
+      "translationMap": {},
+      "translationMapDefaults": {},
+      "successTemplate": "{\"success\": true}"
+    }
+  },
+  "contract": {
+    "input": {
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "visitorId",
+          "agentId",
+          "agentName",
+          "conversationId",
+          "timestamp"
+        ],
+        "properties": {
+          "visitorId": {
+            "type": "string"
+          },
+          "agentId": {
+            "type": "string"
+          },
+          "agentName": {
+            "type": "string"
+          },
+          "conversationId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "output": {
+      "successSchema": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  },
+  "secure": false
+}

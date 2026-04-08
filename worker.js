@@ -22,11 +22,64 @@ function isKvPutLimitError(err) {
   return /kv put\(\) limit exceeded/i.test(msg);
 }
 
-async function safeKvPut(env, key, value, options) {
-  if (!env || !env.MESSAGES) return false;
-  try {
-    await env.MESSAGES.put(key, value, options);
+function hasMessageStore(env) {
+  return Boolean(env && (env.CHAT_STATE || env.MESSAGES));
+}
+
+function getChatStateStub(env) {
+  if (!env || !env.CHAT_STATE) return null;
+  const id = env.CHAT_STATE.idFromName('global-chat-state');
+  return env.CHAT_STATE.get(id);
+}
+
+async function kvGet(env, key) {
+  if (!env || !key) return null;
+
+  const stub = getChatStateStub(env);
+  if (stub) {
+    const res = await stub.fetch(`https://chat-state/get?key=${encodeURIComponent(key)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const reason = await res.text();
+      throw new Error(`CHAT_STATE get failed: ${res.status} ${reason}`);
+    }
+    return await res.text();
+  }
+
+  if (!env.MESSAGES) return null;
+  return env.MESSAGES.get(key);
+}
+
+async function kvPut(env, key, value, options) {
+  if (!env || !key) return false;
+
+  const stub = getChatStateStub(env);
+  if (stub) {
+    const res = await stub.fetch('https://chat-state/put', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key,
+        value,
+        expirationTtl: options && options.expirationTtl ? options.expirationTtl : null
+      })
+    });
+    if (!res.ok) {
+      const reason = await res.text();
+      throw new Error(`CHAT_STATE put failed: ${res.status} ${reason}`);
+    }
     return true;
+  }
+
+  if (!env.MESSAGES) return false;
+  await env.MESSAGES.put(key, value, options);
+  return true;
+}
+
+async function safeKvPut(env, key, value, options) {
+  if (!hasMessageStore(env)) return false;
+  try {
+    return await kvPut(env, key, value, options);
   } catch (err) {
     if (isKvPutLimitError(err)) {
       console.warn(`KV quota reached; skipping write for key ${key}`);
@@ -60,10 +113,10 @@ function collectCandidateVisitorIds(payload) {
 }
 
 async function appendReply(env, visitorId, text) {
-  const existing = await env.MESSAGES.get(visitorId);
+  const existing = await kvGet(env, visitorId);
   const msgs = existing ? JSON.parse(existing) : [];
   msgs.push({ text, timestamp: new Date().toISOString(), agentName: 'Agent' });
-  await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+  await safeKvPut(env, visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
 }
 
 function extractAgentDisplayName(payload) {
@@ -107,7 +160,7 @@ function extractAgentDisplayName(payload) {
 }
 
 async function appendReplyWithName(env, visitorId, text, agentName) {
-  const existing = await env.MESSAGES.get(visitorId);
+  const existing = await kvGet(env, visitorId);
   let msgs = [];
   if (existing) {
     try {
@@ -122,7 +175,7 @@ async function appendReplyWithName(env, visitorId, text, agentName) {
     timestamp: new Date().toISOString(),
     agentName: agentName || 'Agent'
   });
-  await env.MESSAGES.put(visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
+  await safeKvPut(env, visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
 }
 
 async function setTypingState(env, visitorId, isTyping, source, ttlSeconds = 120) {
@@ -234,7 +287,7 @@ function validateDataActionSecret(request, env) {
 }
 
 async function getTypingState(env, visitorId) {
-  const raw = await env.MESSAGES.get(`__typing:${visitorId}`);
+  const raw = await kvGet(env, `__typing:${visitorId}`);
   if (!raw) return { isTyping: false, source: null };
   try {
     const parsed = JSON.parse(raw);
@@ -540,7 +593,7 @@ async function handleSendToGenesys(request, env) {
         await safeKvPut(env, '__lastVisitorId', visitorId, { expirationTtl: 3600 });
         await setTypingState(env, visitorId, false, 'customer');
         const firstEventMarkerKey = `__convInit:${visitorId}`;
-        const markerExists = Boolean(await env.MESSAGES.get(firstEventMarkerKey));
+        const markerExists = Boolean(await kvGet(env, firstEventMarkerKey));
         const isFirstCustomerEvent = Boolean(seedParticipantData) || !markerExists;
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
@@ -655,7 +708,7 @@ async function handleSendTypingToGenesys(request, env) {
         return new Response('Missing required fields: visitorId, isTyping(boolean)', { status: 400 });
       }
 
-      if (!env.MESSAGES) return new Response('Missing KV binding: MESSAGES', { status: 500 });
+      if (!hasMessageStore(env)) return new Response('Missing message store binding: MESSAGES or CHAT_STATE', { status: 500 });
       await safeKvPut(env, '__lastVisitorId', visitorId, { expirationTtl: 3600 });
       await setTypingState(env, visitorId, isTyping, 'customer');
 
@@ -666,7 +719,7 @@ async function handleSendTypingToGenesys(request, env) {
       }
 
       const nowMs = Date.now();
-      const lastSentRaw = await env.MESSAGES.get(`__typingLastSent:${visitorId}`);
+      const lastSentRaw = await kvGet(env, `__typingLastSent:${visitorId}`);
       const lastSentMs = lastSentRaw ? parseInt(lastSentRaw, 10) : 0;
       if (Number.isFinite(lastSentMs) && nowMs - lastSentMs < 5000) {
         return new Response('OK', { status: 200 });
@@ -707,8 +760,8 @@ async function handleGenesysWebhook(request, env) {
         }
 
         if (!authMode) {
-          if (env.MESSAGES) {
-            await env.MESSAGES.put('__lastWebhookAuthFailure', JSON.stringify({
+          if (hasMessageStore(env)) {
+            await safeKvPut(env, '__lastWebhookAuthFailure', JSON.stringify({
               at: new Date().toISOString(),
               hasSignatureHeader: Boolean(signatureHeader),
               hasDataActionHeader: Boolean(request.headers.get('X-Webhook-Key')),
@@ -746,8 +799,8 @@ async function handleGenesysWebhook(request, env) {
           body?.body?.status ||
           null;
 
-        if (env.MESSAGES) {
-          await env.MESSAGES.put('__lastWebhookEvent', JSON.stringify({
+        if (hasMessageStore(env)) {
+          await safeKvPut(env, '__lastWebhookEvent', JSON.stringify({
             at: new Date().toISOString(),
             authMode,
             direction,
@@ -763,7 +816,7 @@ async function handleGenesysWebhook(request, env) {
           }), { expirationTtl: 3600 });
 
           if (outboundLike) {
-            await env.MESSAGES.put('__lastOutboundWebhookEvent', JSON.stringify({
+            await safeKvPut(env, '__lastOutboundWebhookEvent', JSON.stringify({
               at: new Date().toISOString(),
               authMode,
               direction,
@@ -778,7 +831,7 @@ async function handleGenesysWebhook(request, env) {
           }
 
           if (outboundLike && text) {
-            await env.MESSAGES.put('__lastOutboundTextWebhook', JSON.stringify({
+            await safeKvPut(env, '__lastOutboundTextWebhook', JSON.stringify({
               at: new Date().toISOString(),
               authMode,
               direction,
@@ -794,7 +847,7 @@ async function handleGenesysWebhook(request, env) {
         if (typingEvent || (outboundLike && typingState !== null)) {
             const typingCandidates = collectCandidateVisitorIds(body);
             if (typingCandidates.length === 0) {
-              const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+              const lastVisitorId = await kvGet(env, '__lastVisitorId');
               if (lastVisitorId) typingCandidates.push(lastVisitorId);
             }
             for (const visitorId of typingCandidates) {
@@ -804,16 +857,16 @@ async function handleGenesysWebhook(request, env) {
         }
 
         if (outboundLike && text) {
-            if (!env.MESSAGES) {
-              return new Response('Missing KV binding: MESSAGES', { status: 500 });
+            if (!hasMessageStore(env)) {
+              return new Response('Missing message store binding: MESSAGES or CHAT_STATE', { status: 500 });
             }
 
             const agentName = extractAgentDisplayName(body);
-            const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+            const lastVisitorId = await kvGet(env, '__lastVisitorId');
             const candidates = resolveOutboundVisitorIds(body, env, lastVisitorId);
 
             if (candidates.length === 0) {
-              await env.MESSAGES.put('__orphanWebhook', JSON.stringify({
+              await safeKvPut(env, '__orphanWebhook', JSON.stringify({
                 at: new Date().toISOString(),
                 reason: 'no-visitor-id-found',
                 payload: body
@@ -835,17 +888,17 @@ async function handleGenesysWebhook(request, env) {
                   appendResult.failed.push({ visitorId, error: e.message });
                 }
               }
-              await env.MESSAGES.put('__lastAppendResult', JSON.stringify(appendResult), { expirationTtl: 3600 });
+              await safeKvPut(env, '__lastAppendResult', JSON.stringify(appendResult), { expirationTtl: 3600 });
             }
         }
 
         const disconnectLike = isDisconnectLikeWebhook(body);
         if (disconnectLike && !text) {
-            if (!env.MESSAGES) {
-              return new Response('Missing KV binding: MESSAGES', { status: 500 });
+            if (!hasMessageStore(env)) {
+              return new Response('Missing message store binding: MESSAGES or CHAT_STATE', { status: 500 });
             }
 
-            const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
+            const lastVisitorId = await kvGet(env, '__lastVisitorId');
             const candidates = resolveOutboundVisitorIds(body, env, lastVisitorId);
             if (candidates.length > 0) {
               const agentName = extractAgentDisplayName(body);
@@ -858,7 +911,7 @@ async function handleGenesysWebhook(request, env) {
                 );
                 await setTypingState(env, visitorId, false, 'agent', 60);
               }
-              await env.MESSAGES.put('__lastDisconnectEvent', JSON.stringify({
+              await safeKvPut(env, '__lastDisconnectEvent', JSON.stringify({
                 at: new Date().toISOString(),
                 candidates,
                 msgType,
@@ -869,7 +922,7 @@ async function handleGenesysWebhook(request, env) {
             }
         }
 
-        await env.MESSAGES.put('__lastWebhookTyping', JSON.stringify({
+        await safeKvPut(env, '__lastWebhookTyping', JSON.stringify({
           at: new Date().toISOString(),
           direction,
           msgType,
@@ -891,31 +944,31 @@ async function handleGenesysWebhook(request, env) {
 }
 
 async function handleDebugWebhook(env) {
-  if (!env.MESSAGES) {
+  if (!hasMessageStore(env)) {
     return new Response(JSON.stringify({
       uiVersion: UI_VERSION,
-      error: 'Missing KV binding: MESSAGES'
+      error: 'Missing message store binding: MESSAGES or CHAT_STATE'
     }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  const orphan = await env.MESSAGES.get('__orphanWebhook');
-  const lastVisitorId = await env.MESSAGES.get('__lastVisitorId');
-  const lastMessages = lastVisitorId ? await env.MESSAGES.get(lastVisitorId) : null;
+  const orphan = await kvGet(env, '__orphanWebhook');
+  const lastVisitorId = await kvGet(env, '__lastVisitorId');
+  const lastMessages = lastVisitorId ? await kvGet(env, lastVisitorId) : null;
   const typing = lastVisitorId ? await getTypingState(env, lastVisitorId) : { isTyping: false, source: null };
-  const lastWebhookTyping = await env.MESSAGES.get('__lastWebhookTyping');
-  const lastWebhookEvent = await env.MESSAGES.get('__lastWebhookEvent');
-  const lastOutboundWebhookEvent = await env.MESSAGES.get('__lastOutboundWebhookEvent');
-  const lastOutboundTextWebhook = await env.MESSAGES.get('__lastOutboundTextWebhook');
-  const lastAppendResult = await env.MESSAGES.get('__lastAppendResult');
-  const lastDisconnectEvent = await env.MESSAGES.get('__lastDisconnectEvent');
-  const lastCustomerTypingSend = await env.MESSAGES.get('__lastCustomerTypingSend');
-  const lastWebhookAuthFailure = await env.MESSAGES.get('__lastWebhookAuthFailure');
-  const lastFirstEventSeedAttempts = await env.MESSAGES.get('__lastFirstEventSeedAttempts');
-  const lastInitialEventSend = await env.MESSAGES.get('__lastInitialEventSend');
-  const lastParticipantDataSeed = await env.MESSAGES.get('__lastParticipantDataSeed');
+  const lastWebhookTyping = await kvGet(env, '__lastWebhookTyping');
+  const lastWebhookEvent = await kvGet(env, '__lastWebhookEvent');
+  const lastOutboundWebhookEvent = await kvGet(env, '__lastOutboundWebhookEvent');
+  const lastOutboundTextWebhook = await kvGet(env, '__lastOutboundTextWebhook');
+  const lastAppendResult = await kvGet(env, '__lastAppendResult');
+  const lastDisconnectEvent = await kvGet(env, '__lastDisconnectEvent');
+  const lastCustomerTypingSend = await kvGet(env, '__lastCustomerTypingSend');
+  const lastWebhookAuthFailure = await kvGet(env, '__lastWebhookAuthFailure');
+  const lastFirstEventSeedAttempts = await kvGet(env, '__lastFirstEventSeedAttempts');
+  const lastInitialEventSend = await kvGet(env, '__lastInitialEventSend');
+  const lastParticipantDataSeed = await kvGet(env, '__lastParticipantDataSeed');
 
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
@@ -945,9 +998,9 @@ async function handleGetMessages(request, env) {
     const after = parseInt(url.searchParams.get('after') || '0');
 
     if (!visitorId) return new Response('Missing visitorId', { status: 400 });
-  if (!env.MESSAGES) return new Response('Missing KV binding: MESSAGES', { status: 500 });
+  if (!hasMessageStore(env)) return new Response('Missing message store binding: MESSAGES or CHAT_STATE', { status: 500 });
 
-  const existing = await env.MESSAGES.get(visitorId);
+  const existing = await kvGet(env, visitorId);
     const msgs = existing ? JSON.parse(existing) : [];
     const newMsgs = msgs.slice(after);
     const typing = await getTypingState(env, visitorId);
@@ -964,8 +1017,10 @@ async function handleHealthConfig(env) {
   const hasWebhookSecret = Boolean(env.GENESYS_WEBHOOK_SECRET);
   const hasDataActionSharedSecret = Boolean(env.DATA_ACTION_SHARED_SECRET);
   const hasMessagesKv = Boolean(env.MESSAGES);
+  const hasChatState = Boolean(env.CHAT_STATE);
+  const hasAnyMessageStore = hasMessagesKv || hasChatState;
 
-  const ok = hasClientId && hasClientSecret && hasIntegrationId && hasMessagesKv;
+  const ok = hasClientId && hasClientSecret && hasIntegrationId && hasAnyMessageStore;
 
   return new Response(JSON.stringify({
     ok,
@@ -977,12 +1032,54 @@ async function handleHealthConfig(env) {
       hasIntegrationId,
       hasWebhookSecret,
       hasDataActionSharedSecret,
-      hasMessagesKv
+      hasMessagesKv,
+      hasChatState,
+      messageStore: hasChatState ? 'durable-object' : (hasMessagesKv ? 'kv' : 'none')
     }
   }), {
     status: ok ? 200 : 500,
     headers: { 'Content-Type': 'application/json' }
   });
+}
+
+export class ChatStateStore {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (request.method === 'GET' && url.pathname === '/get') {
+      const key = url.searchParams.get('key');
+      if (!key) return new Response('Missing key', { status: 400 });
+
+      const record = await this.state.storage.get(key);
+      if (!record) return new Response('', { status: 404 });
+
+      if (record.expiresAt && Date.now() > record.expiresAt) {
+        await this.state.storage.delete(key);
+        return new Response('', { status: 404 });
+      }
+
+      return new Response(record.value || '', { status: 200 });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/put') {
+      const body = await request.json();
+      const key = body && body.key ? String(body.key) : '';
+      if (!key) return new Response('Missing key', { status: 400 });
+
+      const value = body && body.value != null ? String(body.value) : '';
+      const ttl = body && body.expirationTtl ? Number(body.expirationTtl) : 0;
+      const expiresAt = Number.isFinite(ttl) && ttl > 0 ? Date.now() + (ttl * 1000) : null;
+
+      await this.state.storage.put(key, { value, expiresAt });
+      return new Response('OK', { status: 200 });
+    }
+
+    return new Response('Not Found', { status: 404 });
+  }
 }
 
 const PAGE_HTML = `<!DOCTYPE html>
