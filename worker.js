@@ -5,6 +5,7 @@
 const UI_VERSION = '2026-04-07.4';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
+const LAR_THREADING_TTL_SECONDS = 72 * 60 * 60;
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -73,6 +74,28 @@ async function kvPut(env, key, value, options) {
 
   if (!env.MESSAGES) return false;
   await env.MESSAGES.put(key, value, options);
+  return true;
+}
+
+async function kvDelete(env, key) {
+  if (!env || !key) return false;
+
+  const stub = getChatStateStub(env);
+  if (stub) {
+    const res = await stub.fetch('https://chat-state/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key })
+    });
+    if (!res.ok) {
+      const reason = await res.text();
+      throw new Error(`CHAT_STATE delete failed: ${res.status} ${reason}`);
+    }
+    return true;
+  }
+
+  if (!env.MESSAGES) return false;
+  await env.MESSAGES.delete(key);
   return true;
 }
 
@@ -649,7 +672,15 @@ async function handleSendToGenesys(request, env) {
       body = JSON.parse(normalized);
     }
 
-        const { text, visitorId, seedParticipantData, participantAttributes } = body;
+        const {
+          text,
+          visitorId,
+          visitorNickname,
+          visitorFirstName,
+          visitorLastName,
+          seedParticipantData,
+          participantAttributes
+        } = body;
     if (!text || !visitorId) {
       return new Response('Missing required fields: text, visitorId', { status: 400 });
     }
@@ -662,8 +693,11 @@ async function handleSendToGenesys(request, env) {
         await safeKvPut(env, '__lastVisitorId', visitorId, { expirationTtl: 3600 });
         await setTypingState(env, visitorId, false, 'customer');
         const firstEventMarkerKey = `__convInit:${visitorId}`;
+        const conversationIdKey = `__convId:${visitorId}`;
+        const knownConversationId = await kvGet(env, conversationIdKey);
         const markerExists = Boolean(await kvGet(env, firstEventMarkerKey));
         const isFirstCustomerEvent = Boolean(seedParticipantData) || !markerExists;
+        const shouldPrefetchConversationId = isFirstCustomerEvent && !knownConversationId;
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
 
@@ -677,14 +711,23 @@ async function handleSendToGenesys(request, env) {
         const payload = {
             channel: {
                 messageId,
-                from: { id: visitorId, idType: 'Opaque' },
+                from: {
+                  id: visitorId,
+                  idType: 'Opaque',
+                  nickname: visitorNickname || 'Web Customer',
+                  firstName: visitorFirstName || undefined,
+                  lastName: visitorLastName || undefined
+                },
                 time: now
             },
             direction: 'Inbound',
             text
         };
 
-        const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
+        const endpointBase = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
+        const endpoint = shouldPrefetchConversationId
+          ? `${endpointBase}?prefetchConversationId=true`
+          : endpointBase;
         let payloadVariants = [
           { label: 'base', payload }
         ];
@@ -719,6 +762,7 @@ async function handleSendToGenesys(request, env) {
         }
 
         let genesysResponse = null;
+        let prefetchedConversationId = null;
         const attemptLog = [];
         for (let i = 0; i < payloadVariants.length; i += 1) {
           const variant = payloadVariants[i];
@@ -733,8 +777,17 @@ async function handleSendToGenesys(request, env) {
           });
 
           const bodyText = await res.text();
+          let parsedBody = null;
+          try {
+            parsedBody = bodyText ? JSON.parse(bodyText) : null;
+          } catch {
+            parsedBody = null;
+          }
           attemptLog.push({ variant: variant.label, status: res.status, ok: res.ok, body: bodyText.slice(0, 500) });
-          genesysResponse = { status: res.status, ok: res.ok, bodyText };
+          genesysResponse = { status: res.status, ok: res.ok, bodyText, parsedBody };
+          if (res.ok && parsedBody && typeof parsedBody.conversationId === 'string' && parsedBody.conversationId.trim()) {
+            prefetchedConversationId = parsedBody.conversationId.trim();
+          }
           if (res.ok) break;
         }
 
@@ -746,6 +799,9 @@ async function handleSendToGenesys(request, env) {
         }), { expirationTtl: 3600 });
 
         if (genesysResponse && genesysResponse.ok) {
+          if (prefetchedConversationId) {
+            await safeKvPut(env, conversationIdKey, prefetchedConversationId, { expirationTtl: LAR_THREADING_TTL_SECONDS });
+          }
           if (isFirstCustomerEvent) {
             await safeKvPut(env, firstEventMarkerKey, now, { expirationTtl: 1800 });
             const successAttempt = attemptLog.find((a) => a.ok) || null;
@@ -753,6 +809,8 @@ async function handleSendToGenesys(request, env) {
               at: now,
               visitorId,
               participantData,
+              prefetchedConversationId,
+              usedPrefetchConversationId: shouldPrefetchConversationId,
               successVariant: successAttempt ? successAttempt.variant : null,
               attemptsCount: attemptLog.length
             }), { expirationTtl: 3600 });
@@ -992,6 +1050,11 @@ async function handleGenesysWebhook(request, env) {
                   'System'
                 );
                 await setTypingState(env, visitorId, false, 'agent', 60);
+                try {
+                  await kvDelete(env, `__convId:${visitorId}`);
+                  await kvDelete(env, `__convInit:${visitorId}`);
+                } catch {
+                }
               }
               await safeKvPut(env, '__lastDisconnectEvent', JSON.stringify({
                 at: new Date().toISOString(),
@@ -1039,6 +1102,7 @@ async function handleDebugWebhook(env) {
 
   const orphan = await kvGet(env, '__orphanWebhook');
   const lastVisitorId = await kvGet(env, '__lastVisitorId');
+  const lastVisitorConversationId = lastVisitorId ? await kvGet(env, `__convId:${lastVisitorId}`) : null;
   const lastMessages = lastVisitorId ? await kvGet(env, lastVisitorId) : null;
   const typing = lastVisitorId ? await getTypingState(env, lastVisitorId) : { isTyping: false, source: null };
   const lastWebhookTyping = await kvGet(env, '__lastWebhookTyping');
@@ -1056,6 +1120,7 @@ async function handleDebugWebhook(env) {
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
     lastVisitorId: lastVisitorId || null,
+    lastVisitorConversationId: lastVisitorConversationId || null,
     hasLastMessages: Boolean(lastMessages),
     typing,
     lastWebhookTyping: lastWebhookTyping ? JSON.parse(lastWebhookTyping) : null,
@@ -1161,6 +1226,15 @@ export class ChatStateStore {
       return new Response('OK', { status: 200 });
     }
 
+    if (request.method === 'POST' && url.pathname === '/delete') {
+      const body = await request.json();
+      const key = body && body.key ? String(body.key) : '';
+      if (!key) return new Response('Missing key', { status: 400 });
+
+      await this.state.storage.delete(key);
+      return new Response('OK', { status: 200 });
+    }
+
     return new Response('Not Found', { status: 404 });
   }
 }
@@ -1260,7 +1334,21 @@ const PAGE_HTML = `<!DOCTYPE html>
 </div>
 
 <script>
-  const visitorId = 'visitor-' + Math.random().toString(36).slice(2, 9);
+  function getPersistentVisitorId() {
+    try {
+      const storageKey = 'openmsgVisitorId';
+      const existing = localStorage.getItem(storageKey);
+      if (existing && typeof existing === 'string' && existing.trim()) return existing.trim();
+      const generated = 'visitor-' + Math.random().toString(36).slice(2, 12);
+      localStorage.setItem(storageKey, generated);
+      return generated;
+    } catch {
+      return 'visitor-' + Math.random().toString(36).slice(2, 12);
+    }
+  }
+
+  const visitorId = getPersistentVisitorId();
+  const visitorNickname = 'Web Customer';
   let seenCount = 0;
   let typingTimer = null;
   let connected = false;
@@ -1339,7 +1427,12 @@ const PAGE_HTML = `<!DOCTYPE html>
       const res = await fetch('/send-to-genesys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, visitorId, seedParticipantData: !hasSentCustomerMessage })
+        body: JSON.stringify({
+          text,
+          visitorId,
+          visitorNickname,
+          seedParticipantData: !hasSentCustomerMessage
+        })
       });
       if (res.ok) {
         hasSentCustomerMessage = true;
@@ -1363,7 +1456,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       await fetch('/send-typing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visitorId, isTyping, visitorNickname: 'Web Customer' })
+        body: JSON.stringify({ visitorId, isTyping, visitorNickname })
       });
     } catch { }
   }
