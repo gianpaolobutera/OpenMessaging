@@ -10,7 +10,7 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_classes = ["ChatStateStore"]
+new_sqlite_classes = ["ChatStateStore"]
 
 # Versioned non-secret vars (persist via Git + redeploy)
 [vars]
