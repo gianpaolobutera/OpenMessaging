@@ -638,8 +638,14 @@ async function handleSendToGenesys(request, env) {
                 conversationStartAt: participantData.conversationStartAt
               };
 
-          // Keep only the accepted first-message enrichment path for deterministic behavior.
+          const metadata = { customAttributes };
+
+          // Try the documented metadata shape first, then keep previous accepted variants as fallback.
           payloadVariants = [
+            {
+              label: 'channel.metadata.customAttributes',
+              payload: { ...payload, channel: { ...payload.channel, metadata } }
+            },
             { label: 'channel.customAttributes', payload: { ...payload, channel: { ...payload.channel, customAttributes } } },
             { label: 'base', payload }
           ];
@@ -648,7 +654,7 @@ async function handleSendToGenesys(request, env) {
             at: now,
             visitorId,
             skipped: true,
-            reason: 'disabled-explicit-initial-event; using channel.customAttributes on first message'
+            reason: 'disabled-explicit-initial-event; using metadata/customAttributes on first message'
           }), { expirationTtl: 3600 });
         }
 
