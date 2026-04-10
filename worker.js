@@ -511,24 +511,51 @@ function findFirstTextValue(value, path = 'root', depth = 0, seen = new Set()) {
     }
   }
 
+  const ignoredKeys = new Set([
+    'eventType',
+    'type',
+    'status',
+    'direction',
+    'id',
+    'idType',
+    'platform',
+    'messageId',
+    'conversationId',
+    'channel'
+  ]);
+
   for (const [k, v] of Object.entries(value)) {
+    if (ignoredKeys.has(k)) continue;
     const hit = findFirstTextValue(v, `${path}.${k}`, depth + 1, seen);
     if (hit) return hit;
   }
   return null;
 }
 
+function isNonMessageTextPath(path) {
+  if (!path || typeof path !== 'string') return false;
+  return /(eventType|\.type$|\.status$|\.direction$|\.id$|\.idType$|\.platform$|\.messageId$|\.conversationId$)/i.test(path);
+}
+
 function extractWebhookText(payload) {
   const candidates = [
     ['text', payload?.text],
+    ['messageText', payload?.messageText],
+    ['body.messageText', payload?.body?.messageText],
+    ['event.messageText', payload?.event?.messageText],
+    ['data.messageText', payload?.data?.messageText],
+    ['event.data.messageText', payload?.event?.data?.messageText],
     ['event.text', payload?.event?.text],
     ['body.text', payload?.body?.text],
     ['message.text', payload?.message?.text],
+    ['message.body', payload?.message?.body],
     ['content.text', payload?.content?.text],
     ['event.message.text', payload?.event?.message?.text],
+    ['event.message.body', payload?.event?.message?.body],
     ['event.content.text', payload?.event?.content?.text],
     ['event.body.text', payload?.event?.body?.text],
     ['body.message.text', payload?.body?.message?.text],
+    ['body.message.body', payload?.body?.message?.body],
     ['body.content.text', payload?.body?.content?.text],
     ['body.event.message.text', payload?.body?.event?.message?.text],
     ['body.event.content.text', payload?.body?.event?.content?.text],
@@ -550,7 +577,7 @@ function extractWebhookText(payload) {
 
   for (const [path, node] of deepSearchRoots) {
     const hit = findFirstTextValue(node, path);
-    if (hit) return { text: hit.text, textPath: hit.path };
+    if (hit && !isNonMessageTextPath(hit.path)) return { text: hit.text, textPath: hit.path };
   }
 
   return { text: null, textPath: null };
