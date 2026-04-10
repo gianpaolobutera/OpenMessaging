@@ -657,6 +657,8 @@ function isDisconnectLikeWebhook(payload) {
   return values.some((v) =>
     v.includes('disconnect') ||
     v.includes('disconnected') ||
+    v.includes('left the conversation') ||
+    v.includes('agent left') ||
     v.includes('terminate') ||
     v.includes('ended') ||
     v.includes('closed')
