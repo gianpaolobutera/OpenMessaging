@@ -64,6 +64,11 @@ app.post('/send-to-genesys', async (req, res) => {
         const now = new Date().toISOString();
         const messageId = `${visitorId}-${crypto.randomUUID()}`;
 
+        const customAttributes = {
+            visitorId,
+            channel: 'open-messaging-webchat'
+        };
+
         const payload = {
             channel: {
                 messageId,
@@ -72,27 +77,67 @@ app.post('/send-to-genesys', async (req, res) => {
                     idType: 'Opaque',
                 },
                 time: now,
+                metadata: {
+                    customAttributes
+                }
             },
             direction: 'Inbound',
             text: text,
         };
 
-        console.log('send-to-genesys payload:', JSON.stringify(payload, null, 2));
+        const payloadVariants = [
+            {
+                label: 'channel.metadata.customAttributes',
+                payload
+            },
+            {
+                label: 'channel.customAttributes',
+                payload: {
+                    ...payload,
+                    channel: {
+                        ...payload.channel,
+                        customAttributes
+                    }
+                }
+            },
+            {
+                label: 'base',
+                payload: {
+                    ...payload,
+                    channel: {
+                        ...payload.channel,
+                        metadata: undefined
+                    }
+                }
+            }
+        ];
 
         const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/message`;
-        const response = await axios.post(endpoint, payload, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-            },
-        });
+        let lastError = null;
 
-        if (response.status === 200 || response.status === 201) {
-            return res.sendStatus(200);
+        for (const variant of payloadVariants) {
+            try {
+                console.log(`send-to-genesys payload (${variant.label}):`, JSON.stringify(variant.payload, null, 2));
+                const response = await axios.post(endpoint, variant.payload, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                if (response.status === 200 || response.status === 201) {
+                    console.log('send-to-genesys accepted using variant:', variant.label);
+                    return res.sendStatus(200);
+                }
+            } catch (variantErr) {
+                lastError = variantErr;
+            }
         }
 
-        console.warn('Genesys inbound response', response.status, response.data);
-        return res.status(response.status).json(response.data);
+        console.warn('Genesys inbound response failed for all payload variants');
+        const status = lastError?.response?.status || 500;
+        const message = lastError?.response?.data || lastError?.message || 'Unknown send-to-genesys error';
+        return res.status(status).send(message);
     } catch (err) {
         console.error('send-to-genesys error', err.response ? err.response.data : err.message);
         const status = err.response?.status || 500;
@@ -112,6 +157,11 @@ app.post('/disconnect-customer', async (req, res) => {
         const token = await getAccessToken();
         const now = new Date().toISOString();
 
+        const customAttributes = {
+            visitorId,
+            status: 'disconnect-customer'
+        };
+
         const payload = {
             channel: {
                 from: {
@@ -121,30 +171,67 @@ app.post('/disconnect-customer', async (req, res) => {
                 },
                 time: now,
                 metadata: {
-                    customAttributes: {
-                        status: 'disconnect-customer'
-                    }
+                    customAttributes
                 }
             },
             events: []
         };
 
-        console.log('disconnect-customer payload:', JSON.stringify(payload, null, 2));
+        const payloadVariants = [
+            {
+                label: 'channel.metadata.customAttributes',
+                payload
+            },
+            {
+                label: 'channel.customAttributes',
+                payload: {
+                    ...payload,
+                    channel: {
+                        ...payload.channel,
+                        customAttributes
+                    }
+                }
+            }
+        ];
 
         const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/event`;
-        const response = await axios.post(endpoint, payload, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            }
-        });
+        const attempts = [];
+        let finalError = null;
 
-        if (response.status === 200 || response.status === 201 || response.status === 202) {
-            return res.sendStatus(200);
+        for (const variant of payloadVariants) {
+            try {
+                console.log(`disconnect-customer payload (${variant.label}):`, JSON.stringify(variant.payload, null, 2));
+                const response = await axios.post(endpoint, variant.payload, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                attempts.push({ label: variant.label, status: response.status, ok: true });
+                if (response.status === 200 || response.status === 201 || response.status === 202) {
+                    console.log('disconnect-customer accepted using variant:', variant.label);
+                    return res.sendStatus(200);
+                }
+            } catch (variantErr) {
+                finalError = variantErr;
+                attempts.push({
+                    label: variant.label,
+                    status: variantErr.response?.status || 500,
+                    ok: false,
+                    body: variantErr.response?.data || variantErr.message
+                });
+            }
         }
 
-        console.warn('Genesys disconnect response', response.status, response.data);
-        return res.status(response.status).json(response.data);
+        console.warn('Genesys disconnect attempts failed', JSON.stringify(attempts));
+        if (finalError) {
+            const status = finalError.response?.status || 500;
+            const message = finalError.response?.data || finalError.message;
+            return res.status(status).send(message);
+        }
+
+        return res.status(502).send('Disconnect event not accepted by Genesys');
     } catch (err) {
         console.error('disconnect-customer error', err.response ? err.response.data : err.message);
         const status = err.response?.status || 500;

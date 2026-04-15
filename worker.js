@@ -406,6 +406,10 @@ async function postTypingEventToGenesys(env, token, visitorId, visitorNickname) 
 async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickname) {
   const now = new Date().toISOString();
   const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`;
+  const customAttributes = {
+    visitorId,
+    status: 'disconnect-customer'
+  };
   const payload = {
     channel: {
       from: {
@@ -415,13 +419,28 @@ async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickna
       },
       time: now,
       metadata: {
-        customAttributes: {
-          status: 'disconnect-customer'
-        }
+        customAttributes
       }
     },
     events: []
   };
+
+  const payloadVariants = [
+    {
+      label: 'channel.metadata.customAttributes',
+      payload
+    },
+    {
+      label: 'channel.customAttributes',
+      payload: {
+        ...payload,
+        channel: {
+          ...payload.channel,
+          customAttributes
+        }
+      }
+    }
+  ];
 
   if (endpoint.includes('/undefined/')) {
     return {
@@ -436,25 +455,37 @@ async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickna
     };
   }
 
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
+  const attempts = [];
+  let accepted = false;
 
-  const bodyText = await res.text();
-  return {
-    ok: res.ok,
-    attempts: [{
-      label: 'open-event-disconnect',
+  for (const variant of payloadVariants) {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(variant.payload)
+    });
+
+    const bodyText = await res.text();
+    attempts.push({
+      label: `open-event-disconnect:${variant.label}`,
       endpoint,
       status: res.status,
       ok: res.ok,
       body: bodyText.slice(0, 500)
-    }]
+    });
+
+    if (res.ok) {
+      accepted = true;
+      break;
+    }
+  }
+
+  return {
+    ok: accepted,
+    attempts
   };
 }
 
