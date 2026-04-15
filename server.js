@@ -96,8 +96,30 @@ app.post('/send-to-genesys', async (req, res) => {
 
         const payloadVariants = [
             {
+                label: 'channel.metadata.customAttributes.no-to',
+                payload: {
+                    ...payload,
+                    channel: {
+                        ...payload.channel,
+                        to: undefined
+                    }
+                }
+            },
+            {
                 label: 'channel.metadata.customAttributes',
                 payload
+            },
+            {
+                label: 'channel.customAttributes.no-to',
+                payload: {
+                    ...payload,
+                    channel: {
+                        ...payload.channel,
+                        to: undefined,
+                        metadata: undefined,
+                        customAttributes
+                    }
+                }
             },
             {
                 label: 'channel.customAttributes',
@@ -197,6 +219,27 @@ app.post('/disconnect-customer', async (req, res) => {
         };
 
         const payloadVariants = [
+            {
+                label: 'channel.metadata.customAttributes.no-to:text-empty',
+                payload: {
+                    ...basePayload,
+                    channel: {
+                        ...basePayload.channel,
+                        to: undefined
+                    }
+                }
+            },
+            {
+                label: 'channel.metadata.customAttributes.no-to:text-space',
+                payload: {
+                    ...basePayload,
+                    text: ' ',
+                    channel: {
+                        ...basePayload.channel,
+                        to: undefined
+                    }
+                }
+            },
             {
                 label: 'channel.metadata.customAttributes:text-empty',
                 payload: basePayload
