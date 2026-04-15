@@ -403,6 +403,61 @@ async function postTypingEventToGenesys(env, token, visitorId, visitorNickname) 
   };
 }
 
+async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickname) {
+  const now = new Date().toISOString();
+  const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`;
+  const payload = {
+    channel: {
+      from: {
+        id: visitorId,
+        idType: 'Opaque',
+        nickname: visitorNickname || 'Web Customer'
+      },
+      time: now,
+      metadata: {
+        customAttributes: {
+          status: 'disconnect-customer'
+        }
+      }
+    },
+    events: []
+  };
+
+  if (endpoint.includes('/undefined/')) {
+    return {
+      ok: false,
+      attempts: [{
+        label: 'open-event-disconnect',
+        endpoint,
+        status: 0,
+        ok: false,
+        body: 'Missing INTEGRATION_ID'
+      }]
+    };
+  }
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const bodyText = await res.text();
+  return {
+    ok: res.ok,
+    attempts: [{
+      label: 'open-event-disconnect',
+      endpoint,
+      status: res.status,
+      ok: res.ok,
+      body: bodyText.slice(0, 500)
+    }]
+  };
+}
+
 function extractTypingState(payload) {
   const eventLists = [
     payload?.events,
@@ -902,6 +957,47 @@ async function handleSendTypingToGenesys(request, env) {
     }
 }
 
+async function handleDisconnectCustomer(request, env) {
+  try {
+    const body = await request.json();
+    const { visitorId, visitorNickname } = body || {};
+
+    if (!visitorId) {
+      return new Response('Missing required field: visitorId', { status: 400 });
+    }
+
+    if (!env.INTEGRATION_ID) {
+      return new Response('Missing Worker secret: INTEGRATION_ID', { status: 500 });
+    }
+
+    await safeKvPut(env, '__lastVisitorId', visitorId, { expirationTtl: 3600 });
+    await setTypingState(env, visitorId, false, 'customer');
+
+    const token = await getAccessToken(env);
+    const result = await postDisconnectEventToGenesys(env, token, visitorId, visitorNickname);
+
+    await safeKvPut(env, '__lastCustomerDisconnectSend', JSON.stringify({
+      at: new Date().toISOString(),
+      visitorId,
+      accepted: result.ok,
+      attempts: result.attempts
+    }), { expirationTtl: 3600 });
+
+    if (!result.ok) {
+      const detail = result.attempts && result.attempts[0] ? result.attempts[0].body : 'Unable to send disconnect event';
+      return new Response(detail, { status: result.attempts && result.attempts[0] ? result.attempts[0].status || 502 : 502 });
+    }
+
+    if (hasMessageStore(env)) {
+      await appendReplyWithName(env, visitorId, 'You disconnected the chat.', 'System');
+    }
+
+    return new Response('OK', { status: 200 });
+  } catch (err) {
+    return new Response(`disconnect-customer failed: ${err.message}`, { status: 500 });
+  }
+}
+
 async function handleGenesysWebhook(request, env) {
     try {
         const signatureHeader = request.headers.get('X-Hub-Signature-256');
@@ -1142,6 +1238,7 @@ async function handleDebugWebhook(env) {
   const lastFirstEventSeedAttempts = await kvGet(env, '__lastFirstEventSeedAttempts');
   const lastInitialEventSend = await kvGet(env, '__lastInitialEventSend');
   const lastParticipantDataSeed = await kvGet(env, '__lastParticipantDataSeed');
+  const lastCustomerDisconnectSend = await kvGet(env, '__lastCustomerDisconnectSend');
 
   return new Response(JSON.stringify({
     uiVersion: UI_VERSION,
@@ -1160,6 +1257,7 @@ async function handleDebugWebhook(env) {
     lastFirstEventSeedAttempts: lastFirstEventSeedAttempts ? JSON.parse(lastFirstEventSeedAttempts) : null,
     lastInitialEventSend: lastInitialEventSend ? JSON.parse(lastInitialEventSend) : null,
     lastParticipantDataSeed: lastParticipantDataSeed ? JSON.parse(lastParticipantDataSeed) : null,
+    lastCustomerDisconnectSend: lastCustomerDisconnectSend ? JSON.parse(lastCustomerDisconnectSend) : null,
     orphanWebhook: orphan ? JSON.parse(orphan) : null
   }), {
     headers: { 'Content-Type': 'application/json' }
@@ -1318,10 +1416,14 @@ const PAGE_HTML = `<!DOCTYPE html>
   .chat-footer { background: #fff; padding: 12px 16px; border-top: 1px solid #e8e8e8; display: flex; align-items: flex-end; gap: 10px; }
   #msg { flex: 1; border: 1.5px solid #e0e0e0; border-radius: 24px; padding: 10px 16px; font-size: 14px; resize: none; outline: none; max-height: 100px; line-height: 1.4; transition: border-color 0.2s; font-family: inherit; }
   #msg:focus { border-color: #1a73e8; }
+  .chat-controls { display: flex; flex-direction: column; gap: 8px; align-items: center; }
   #sendBtn { width: 42px; height: 42px; border-radius: 50%; background: #1a73e8; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 0.2s; }
   #sendBtn:hover { background: #1558b0; }
   #sendBtn:disabled { background: #c5d9f7; cursor: default; }
   #sendBtn svg { width: 20px; height: 20px; fill: #fff; }
+  #disconnectBtn { border: 1px solid #d7dbe7; background: #fff; color: #4a5568; border-radius: 16px; padding: 5px 10px; font-size: 11px; cursor: pointer; }
+  #disconnectBtn:hover { background: #f6f8fc; }
+  #disconnectBtn:disabled { opacity: 0.5; cursor: default; }
 
   /* Status bar */
   .status-bar { background: #fff; padding: 6px 16px; border-top: 1px solid #f0f0f0; font-size: 11px; color: #aaa; text-align: center; }
@@ -1349,9 +1451,12 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   <div class="chat-footer">
     <textarea id="msg" rows="1" placeholder="Type a message…" oninput="autoResize(this);handleTypingInput();" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();send();}"></textarea>
-    <button id="sendBtn" onclick="send()" title="Send">
-      <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-    </button>
+    <div class="chat-controls">
+      <button id="sendBtn" onclick="send()" title="Send">
+        <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      </button>
+      <button id="disconnectBtn" onclick="disconnectCustomer()" title="Disconnect chat">Disconnect</button>
+    </div>
   </div>
   <div class="status-bar" id="statusBar">Connecting… (UI ${UI_VERSION})</div>
   <div class="debug-row">
@@ -1380,6 +1485,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   let connected = false;
   let localTypingSent = false;
   let hasSentCustomerMessage = false;
+  let isDisconnected = false;
 
   function autoResize(el) {
     el.style.height = 'auto';
@@ -1440,6 +1546,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   }
 
   async function send() {
+    if (isDisconnected) return;
     const input = document.getElementById('msg');
     const btn = document.getElementById('sendBtn');
     const text = input.value.trim();
@@ -1473,6 +1580,43 @@ const PAGE_HTML = `<!DOCTYPE html>
     }
     btn.disabled = false;
     input.focus();
+  }
+
+  async function disconnectCustomer() {
+    if (isDisconnected) return;
+
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const input = document.getElementById('msg');
+    disconnectBtn.disabled = true;
+    sendBtn.disabled = true;
+
+    try {
+      await sendTyping(false);
+      const res = await fetch('/disconnect-customer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visitorId, visitorNickname })
+      });
+
+      if (res.ok) {
+        isDisconnected = true;
+        input.disabled = true;
+        appendBubble('System', 'You disconnected the chat.', 'incoming');
+        setStatus('Chat disconnected by customer');
+        removeTyping();
+        return;
+      }
+
+      const reason = await res.text();
+      setStatus('Disconnect failed (' + res.status + '): ' + reason);
+      disconnectBtn.disabled = false;
+      sendBtn.disabled = false;
+    } catch (e) {
+      setStatus('Network error while disconnecting');
+      disconnectBtn.disabled = false;
+      sendBtn.disabled = false;
+    }
   }
 
   async function sendTyping(isTyping) {
@@ -1529,6 +1673,7 @@ async function handleRequest(request, env) {
 
     if (method === 'POST' && pathname === '/send-to-genesys') return handleSendToGenesys(request, env);
     if (method === 'POST' && pathname === '/send-typing') return handleSendTypingToGenesys(request, env);
+    if (method === 'POST' && pathname === '/disconnect-customer') return handleDisconnectCustomer(request, env);
     if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request, env);
     if (method === 'GET' && pathname === '/get-messages') return handleGetMessages(request, env);
     if (method === 'GET' && pathname === '/health-config') return handleHealthConfig(env);

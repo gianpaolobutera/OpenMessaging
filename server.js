@@ -101,6 +101,58 @@ app.post('/send-to-genesys', async (req, res) => {
     }
 });
 
+// 1b. INBOUND DISCONNECT: Web Page -> Middleware -> Genesys (empty event + participant data)
+app.post('/disconnect-customer', async (req, res) => {
+    const { visitorId, visitorNickname } = req.body;
+    if (!visitorId) {
+        return res.status(400).send('Missing required field: visitorId');
+    }
+
+    try {
+        const token = await getAccessToken();
+        const now = new Date().toISOString();
+
+        const payload = {
+            channel: {
+                from: {
+                    id: visitorId,
+                    idType: 'Opaque',
+                    nickname: visitorNickname || 'Web Customer'
+                },
+                time: now,
+                metadata: {
+                    customAttributes: {
+                        status: 'disconnect-customer'
+                    }
+                }
+            },
+            events: []
+        };
+
+        console.log('disconnect-customer payload:', JSON.stringify(payload, null, 2));
+
+        const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/event`;
+        const response = await axios.post(endpoint, payload, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.status === 200 || response.status === 201 || response.status === 202) {
+            return res.sendStatus(200);
+        }
+
+        console.warn('Genesys disconnect response', response.status, response.data);
+        return res.status(response.status).json(response.data);
+    } catch (err) {
+        console.error('disconnect-customer error', err.response ? err.response.data : err.message);
+        const status = err.response?.status || 500;
+        const message = err.response?.data || err.message;
+        return res.status(status).send(message);
+    }
+});
+
 // 2. OUTBOUND: Genesys Webhook -> Middleware -> Web Page (via Socket.io)
 app.post('/genesys-webhook', (req, res) => {
     const outboundMessage = req.body;

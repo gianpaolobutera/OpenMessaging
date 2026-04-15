@@ -4,6 +4,7 @@
     <div id="chat" style="height:300px; border:1px solid #ccc; overflow-y:scroll;"></div>
     <input id="msg" type="text" placeholder="Type a message...">
     <button onclick="send()">Send</button>
+    <button id="disconnectBtn" onclick="disconnectCustomer()">Disconnect</button>
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
@@ -25,6 +26,30 @@
                 body: JSON.stringify({ text, visitorId })
             });
             document.getElementById('msg').value = '';
+        }
+
+        async function disconnectCustomer() {
+            const btn = document.getElementById('disconnectBtn');
+            btn.disabled = true;
+            try {
+                const res = await fetch('/disconnect-customer', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ visitorId, visitorNickname: 'Web Customer' })
+                });
+
+                if (res.ok) {
+                    document.getElementById('chat').innerHTML += `<p><i>Chat disconnected by customer.</i></p>`;
+                    document.getElementById('msg').disabled = true;
+                } else {
+                    const reason = await res.text();
+                    document.getElementById('chat').innerHTML += `<p><i>Disconnect failed: ${reason}</i></p>`;
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                document.getElementById('chat').innerHTML += `<p><i>Disconnect failed: network error</i></p>`;
+                btn.disabled = false;
+            }
         }
     </script>
 </body>
