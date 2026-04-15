@@ -71,15 +71,8 @@ app.post('/send-to-genesys', async (req, res) => {
         };
 
         const payload = {
-            id: messageId,
             channel: {
-                id: INTEGRATION_ID,
-                platform: 'Open',
-                type: 'Private',
                 messageId,
-                to: {
-                    id: INTEGRATION_ID
-                },
                 from: {
                     id: visitorId,
                     idType: 'Opaque',
@@ -90,36 +83,14 @@ app.post('/send-to-genesys', async (req, res) => {
                     customAttributes
                 }
             },
-            type: 'Text',
+            direction: 'Inbound',
             text: text,
         };
 
         const payloadVariants = [
             {
-                label: 'channel.metadata.customAttributes.no-to',
-                payload: {
-                    ...payload,
-                    channel: {
-                        ...payload.channel,
-                        to: undefined
-                    }
-                }
-            },
-            {
                 label: 'channel.metadata.customAttributes',
                 payload
-            },
-            {
-                label: 'channel.customAttributes.no-to',
-                payload: {
-                    ...payload,
-                    channel: {
-                        ...payload.channel,
-                        to: undefined,
-                        metadata: undefined,
-                        customAttributes
-                    }
-                }
             },
             {
                 label: 'channel.customAttributes',
@@ -127,6 +98,7 @@ app.post('/send-to-genesys', async (req, res) => {
                     ...payload,
                     channel: {
                         ...payload.channel,
+                        metadata: undefined,
                         customAttributes
                     }
                 }
@@ -195,15 +167,8 @@ app.post('/disconnect-customer', async (req, res) => {
         };
 
         const basePayload = {
-            id: messageId,
             channel: {
-                id: INTEGRATION_ID,
-                platform: 'Open',
-                type: 'Private',
                 messageId,
-                to: {
-                    id: INTEGRATION_ID
-                },
                 from: {
                     id: visitorId,
                     idType: 'Opaque',
@@ -214,58 +179,19 @@ app.post('/disconnect-customer', async (req, res) => {
                     customAttributes
                 }
             },
-            type: 'Text',
-            text: ''
+            direction: 'Inbound',
+            text: ' '
         };
 
         const payloadVariants = [
             {
-                label: 'channel.metadata.customAttributes.no-to:text-empty',
-                payload: {
-                    ...basePayload,
-                    channel: {
-                        ...basePayload.channel,
-                        to: undefined
-                    }
-                }
-            },
-            {
-                label: 'channel.metadata.customAttributes.no-to:text-space',
-                payload: {
-                    ...basePayload,
-                    text: ' ',
-                    channel: {
-                        ...basePayload.channel,
-                        to: undefined
-                    }
-                }
-            },
-            {
-                label: 'channel.metadata.customAttributes:text-empty',
+                label: 'channel.metadata.customAttributes',
                 payload: basePayload
             },
             {
-                label: 'channel.metadata.customAttributes:text-space',
+                label: 'channel.customAttributes',
                 payload: {
                     ...basePayload,
-                    text: ' '
-                }
-            },
-            {
-                label: 'channel.customAttributes:text-empty',
-                payload: {
-                    ...basePayload,
-                    channel: {
-                        ...basePayload.channel,
-                        customAttributes
-                    }
-                }
-            },
-            {
-                label: 'channel.customAttributes:text-space',
-                payload: {
-                    ...basePayload,
-                    text: ' ',
                     channel: {
                         ...basePayload.channel,
                         customAttributes
