@@ -403,15 +403,25 @@ async function postTypingEventToGenesys(env, token, visitorId, visitorNickname) 
   };
 }
 
-async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickname) {
+async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickname, conversationId = null) {
   const now = new Date().toISOString();
-  const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/event`;
+  const messageId = `${visitorId}-disconnect-${crypto.randomUUID()}`;
+  const targetId = conversationId || env.INTEGRATION_ID;
+  const endpoint = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${targetId}/inbound/open/message`;
   const customAttributes = {
     visitorId,
     status: 'disconnect-customer'
   };
-  const payload = {
+  const basePayload = {
+    id: messageId,
     channel: {
+      id: env.INTEGRATION_ID,
+      platform: 'Open',
+      type: 'Private',
+      messageId,
+      to: {
+        id: env.INTEGRATION_ID
+      },
       from: {
         id: visitorId,
         idType: 'Opaque',
@@ -422,20 +432,39 @@ async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickna
         customAttributes
       }
     },
-    events: []
+    type: 'Text',
+    text: ''
   };
 
   const payloadVariants = [
     {
-      label: 'channel.metadata.customAttributes',
-      payload
+      label: 'channel.metadata.customAttributes:text-empty',
+      payload: basePayload
     },
     {
-      label: 'channel.customAttributes',
+      label: 'channel.metadata.customAttributes:text-space',
       payload: {
-        ...payload,
+        ...basePayload,
+        text: ' '
+      }
+    },
+    {
+      label: 'channel.customAttributes:text-empty',
+      payload: {
+        ...basePayload,
         channel: {
-          ...payload.channel,
+          ...basePayload.channel,
+          customAttributes
+        }
+      }
+    },
+    {
+      label: 'channel.customAttributes:text-space',
+      payload: {
+        ...basePayload,
+        text: ' ',
+        channel: {
+          ...basePayload.channel,
           customAttributes
         }
       }
@@ -446,7 +475,7 @@ async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickna
     return {
       ok: false,
       attempts: [{
-        label: 'open-event-disconnect',
+        label: 'open-message-disconnect',
         endpoint,
         status: 0,
         ok: false,
@@ -470,7 +499,7 @@ async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickna
 
     const bodyText = await res.text();
     attempts.push({
-      label: `open-event-disconnect:${variant.label}`,
+      label: `open-message-disconnect:${variant.label}`,
       endpoint,
       status: res.status,
       ok: res.ok,
@@ -823,9 +852,34 @@ async function handleSendToGenesys(request, env) {
           conversationStartAt: now
         };
 
+        const customAttributes = {
+          ...(participantAttributes && typeof participantAttributes === 'object' ? participantAttributes : {}),
+          visitorId
+        };
+
+        if (isFirstCustomerEvent) {
+          customAttributes.channel = customAttributes.channel || participantData.channel;
+          customAttributes.uiVersion = customAttributes.uiVersion || participantData.uiVersion;
+          customAttributes.conversationStartAt = customAttributes.conversationStartAt || participantData.conversationStartAt;
+        }
+
+        const targetId = knownConversationId || env.INTEGRATION_ID;
+        const endpointBase = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${targetId}/inbound/open/message`;
+        const canPrefetchConversationId = !knownConversationId;
+        const endpoint = (shouldPrefetchConversationId && canPrefetchConversationId)
+          ? `${endpointBase}?prefetchConversationId=true`
+          : endpointBase;
+
         const payload = {
+            id: messageId,
             channel: {
+                id: env.INTEGRATION_ID,
+                platform: 'Open',
+                type: 'Private',
                 messageId,
+                to: {
+                  id: env.INTEGRATION_ID
+                },
                 from: {
                   id: visitorId,
                   idType: 'Opaque',
@@ -833,40 +887,43 @@ async function handleSendToGenesys(request, env) {
                   firstName: visitorFirstName || undefined,
                   lastName: visitorLastName || undefined
                 },
-                time: now
+                time: now,
+                metadata: {
+                  customAttributes
+                }
             },
-            direction: 'Inbound',
+            type: 'Text',
             text
         };
 
-        const endpointBase = `${getGenesysApiUrl(env)}/api/v2/conversations/messages/${env.INTEGRATION_ID}/inbound/open/message`;
-        const endpoint = shouldPrefetchConversationId
-          ? `${endpointBase}?prefetchConversationId=true`
-          : endpointBase;
         let payloadVariants = [
-          { label: 'base', payload }
+          {
+            label: 'channel.metadata.customAttributes',
+            payload
+          },
+          {
+            label: 'channel.customAttributes',
+            payload: {
+              ...payload,
+              channel: {
+                ...payload.channel,
+                customAttributes
+              }
+            }
+          },
+          {
+            label: 'base',
+            payload: {
+              ...payload,
+              channel: {
+                ...payload.channel,
+                metadata: undefined
+              }
+            }
+          }
         ];
+
         if (isFirstCustomerEvent) {
-          const customAttributes = (participantAttributes && typeof participantAttributes === 'object')
-            ? participantAttributes
-            : {
-                visitorId,
-                channel: participantData.channel,
-                uiVersion: participantData.uiVersion,
-                conversationStartAt: participantData.conversationStartAt
-              };
-
-          const metadata = { customAttributes };
-
-          // Try the documented metadata shape first, then keep previous accepted variants as fallback.
-          payloadVariants = [
-            {
-              label: 'channel.metadata.customAttributes',
-              payload: { ...payload, channel: { ...payload.channel, metadata } }
-            },
-            { label: 'channel.customAttributes', payload: { ...payload, channel: { ...payload.channel, customAttributes } } },
-            { label: 'base', payload }
-          ];
 
           await safeKvPut(env, '__lastInitialEventSend', JSON.stringify({
             at: now,
@@ -1005,7 +1062,8 @@ async function handleDisconnectCustomer(request, env) {
     await setTypingState(env, visitorId, false, 'customer');
 
     const token = await getAccessToken(env);
-    const result = await postDisconnectEventToGenesys(env, token, visitorId, visitorNickname);
+    const conversationId = await kvGet(env, `__convId:${visitorId}`);
+    const result = await postDisconnectEventToGenesys(env, token, visitorId, visitorNickname, conversationId || null);
 
     await safeKvPut(env, '__lastCustomerDisconnectSend', JSON.stringify({
       at: new Date().toISOString(),

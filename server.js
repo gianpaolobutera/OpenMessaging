@@ -58,7 +58,7 @@ async function getAccessToken() {
 
 // 1. INBOUND: Web Page -> Middleware -> Genesys
 app.post('/send-to-genesys', async (req, res) => {
-    const { text, visitorId } = req.body;
+    const { text, visitorId, visitorNickname, participantAttributes } = req.body;
     try {
         const token = await getAccessToken();
         const now = new Date().toISOString();
@@ -66,22 +66,31 @@ app.post('/send-to-genesys', async (req, res) => {
 
         const customAttributes = {
             visitorId,
+            ...(participantAttributes && typeof participantAttributes === 'object' ? participantAttributes : {}),
             channel: 'open-messaging-webchat'
         };
 
         const payload = {
+            id: messageId,
             channel: {
+                id: INTEGRATION_ID,
+                platform: 'Open',
+                type: 'Private',
                 messageId,
+                to: {
+                    id: INTEGRATION_ID
+                },
                 from: {
                     id: visitorId,
                     idType: 'Opaque',
+                    nickname: visitorNickname || 'Web Customer'
                 },
                 time: now,
                 metadata: {
                     customAttributes
                 }
             },
-            direction: 'Inbound',
+            type: 'Text',
             text: text,
         };
 
@@ -156,14 +165,23 @@ app.post('/disconnect-customer', async (req, res) => {
     try {
         const token = await getAccessToken();
         const now = new Date().toISOString();
+        const messageId = `${visitorId}-disconnect-${crypto.randomUUID()}`;
 
         const customAttributes = {
             visitorId,
             status: 'disconnect-customer'
         };
 
-        const payload = {
+        const basePayload = {
+            id: messageId,
             channel: {
+                id: INTEGRATION_ID,
+                platform: 'Open',
+                type: 'Private',
+                messageId,
+                to: {
+                    id: INTEGRATION_ID
+                },
                 from: {
                     id: visitorId,
                     idType: 'Opaque',
@@ -174,27 +192,46 @@ app.post('/disconnect-customer', async (req, res) => {
                     customAttributes
                 }
             },
-            events: []
+            type: 'Text',
+            text: ''
         };
 
         const payloadVariants = [
             {
-                label: 'channel.metadata.customAttributes',
-                payload
+                label: 'channel.metadata.customAttributes:text-empty',
+                payload: basePayload
             },
             {
-                label: 'channel.customAttributes',
+                label: 'channel.metadata.customAttributes:text-space',
                 payload: {
-                    ...payload,
+                    ...basePayload,
+                    text: ' '
+                }
+            },
+            {
+                label: 'channel.customAttributes:text-empty',
+                payload: {
+                    ...basePayload,
                     channel: {
-                        ...payload.channel,
+                        ...basePayload.channel,
+                        customAttributes
+                    }
+                }
+            },
+            {
+                label: 'channel.customAttributes:text-space',
+                payload: {
+                    ...basePayload,
+                    text: ' ',
+                    channel: {
+                        ...basePayload.channel,
                         customAttributes
                     }
                 }
             }
         ];
 
-        const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/event`;
+        const endpoint = `${GENESYS_API_URL}/api/v2/conversations/messages/${INTEGRATION_ID}/inbound/open/message`;
         const attempts = [];
         let finalError = null;
 
