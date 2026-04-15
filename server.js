@@ -180,7 +180,7 @@ app.post('/disconnect-customer', async (req, res) => {
                 }
             },
             direction: 'Inbound',
-            text: ' '
+            text: 'disconnect-customer'
         };
 
         const payloadVariants = [

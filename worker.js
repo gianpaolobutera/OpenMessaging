@@ -425,7 +425,7 @@ async function postDisconnectEventToGenesys(env, token, visitorId, visitorNickna
       }
     },
     direction: 'Inbound',
-    text: ' '
+    text: 'disconnect-customer'
   };
 
   const payloadVariants = [
