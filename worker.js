@@ -754,6 +754,24 @@ function isDisconnectLikeWebhook(payload) {
   );
 }
 
+function extractDisconnectMessage(payload) {
+  const candidates = [
+    payload?.metadata?.message,
+    payload?.event?.metadata?.message,
+    payload?.body?.metadata?.message,
+    payload?.event?.body?.metadata?.message,
+    payload?.body?.event?.body?.metadata?.message,
+    payload?.message,
+    payload?.event?.message,
+    payload?.body?.message
+  ];
+
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
 async function getAccessToken(env) {
   if (!env.GENESYS_CLIENT_ID || !env.GENESYS_CLIENT_SECRET) {
     throw new Error('Missing Worker secrets: GENESYS_CLIENT_ID or GENESYS_CLIENT_SECRET');
@@ -1223,11 +1241,13 @@ async function handleGenesysWebhook(request, env) {
             const candidates = resolveOutboundVisitorIds(body, env, lastVisitorId);
             if (candidates.length > 0) {
               const agentName = extractAgentDisplayName(body);
+              const disconnectMessage = extractDisconnectMessage(body);
+              const noticeText = disconnectMessage || `${agentName} disconnected the interaction.`;
               for (const visitorId of candidates) {
                 await appendReplyWithName(
                   env,
                   visitorId,
-                  `${agentName} disconnected the interaction.`,
+                  noticeText,
                   'System'
                 );
                 await setTypingState(env, visitorId, false, 'agent', 60);
@@ -1237,6 +1257,7 @@ async function handleGenesysWebhook(request, env) {
                 candidates,
                 msgType,
                 eventType,
+                disconnectMessage,
                 status: body?.status || null,
                 direction
               }), { expirationTtl: 3600 });
