@@ -357,6 +357,15 @@ app.post('/disconnect-customer', async (req, res) => {
     }
 });
 
+// Local Express mode does not include object storage.
+// Use Cloudflare Worker mode with R2 for direct customer file uploads.
+app.post('/upload-pdf', (req, res) => {
+    res.status(501).json({
+        ok: false,
+        error: 'PDF upload endpoint is available only in Worker mode with R2 binding (CUSTOMER_UPLOADS).'
+    });
+});
+
 // 2. OUTBOUND: Genesys Webhook -> Middleware -> Web Page (via Socket.io)
 app.post('/genesys-webhook', (req, res) => {
     const outboundMessage = req.body;

@@ -12,6 +12,10 @@ function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
 }
 
+function getR2PublicBaseUrl(env) {
+  return normalizeString(env.R2_PUBLIC_BASE_URL).replace(/\/+$/, '');
+}
+
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -28,6 +32,10 @@ function hasMessageStore(env) {
   return Boolean(env && (env.CHAT_STATE || env.MESSAGES));
 }
 
+function hasUploadStore(env) {
+  return Boolean(env && env.CUSTOMER_UPLOADS);
+}
+
 function normalizeString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
@@ -36,6 +44,32 @@ function sanitizeFilename(filename, fallback = 'document.pdf') {
   const trimmed = normalizeString(filename);
   if (!trimmed) return fallback;
   return trimmed.toLowerCase().endsWith('.pdf') ? trimmed : `${trimmed}.pdf`;
+}
+
+function sanitizeKeySegment(value) {
+  const safe = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return safe || 'document.pdf';
+}
+
+function buildUploadObjectKey(filename) {
+  const now = new Date();
+  const yyyy = String(now.getUTCFullYear());
+  const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(now.getUTCDate()).padStart(2, '0');
+  const baseName = sanitizeKeySegment(filename);
+  return `customer-pdf/${yyyy}/${mm}/${dd}/${crypto.randomUUID()}-${baseName}`;
+}
+
+function objectKeyToPublicUrl(baseUrl, key) {
+  const encoded = key
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return `${baseUrl}/${encoded}`;
 }
 
 function normalizePdfAttachment(input, index = 0) {
@@ -1467,6 +1501,61 @@ async function handleGetMessages(request, env) {
     });
 }
 
+async function handleUploadPdf(request, env) {
+  if (!hasUploadStore(env)) {
+    return jsonResponse({ ok: false, error: 'Missing R2 binding: CUSTOMER_UPLOADS' }, 500);
+  }
+
+  const publicBaseUrl = getR2PublicBaseUrl(env);
+  if (!publicBaseUrl) {
+    return jsonResponse({ ok: false, error: 'Missing non-secret var: R2_PUBLIC_BASE_URL' }, 500);
+  }
+
+  try {
+    const form = await request.formData();
+    const file = form.get('file');
+    if (!file || typeof file.arrayBuffer !== 'function') {
+      return jsonResponse({ ok: false, error: 'Missing file field in multipart form-data' }, 400);
+    }
+
+    const filename = sanitizeFilename(file.name || String(form.get('filename') || ''), 'document.pdf');
+    const contentType = normalizeString(file.type).toLowerCase();
+    const hasPdfMime = contentType === 'application/pdf' || !contentType;
+    const hasPdfExtension = filename.toLowerCase().endsWith('.pdf');
+    if (!hasPdfMime || !hasPdfExtension) {
+      return jsonResponse({ ok: false, error: 'Only PDF files are allowed' }, 400);
+    }
+
+    const sizeBytes = Number(file.size || 0);
+    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+      return jsonResponse({ ok: false, error: 'Uploaded file is empty' }, 400);
+    }
+    if (sizeBytes > MAX_PDF_SIZE_BYTES) {
+      return jsonResponse({ ok: false, error: 'PDF exceeds 25 MB limit' }, 400);
+    }
+
+    const objectKey = buildUploadObjectKey(filename);
+    const bytes = await file.arrayBuffer();
+    await env.CUSTOMER_UPLOADS.put(objectKey, bytes, {
+      httpMetadata: {
+        contentType: 'application/pdf',
+        contentDisposition: `inline; filename="${filename}"`
+      }
+    });
+
+    const publicUrl = objectKeyToPublicUrl(publicBaseUrl, objectKey);
+    return jsonResponse({
+      ok: true,
+      url: publicUrl,
+      filename,
+      contentSizeBytes: sizeBytes,
+      key: objectKey
+    });
+  } catch (err) {
+    return jsonResponse({ ok: false, error: err.message }, 500);
+  }
+}
+
 async function handleHealthConfig(env) {
   const hasClientId = Boolean(env.GENESYS_CLIENT_ID);
   const hasClientSecret = Boolean(env.GENESYS_CLIENT_SECRET);
@@ -1475,6 +1564,8 @@ async function handleHealthConfig(env) {
   const hasDataActionSharedSecret = Boolean(env.DATA_ACTION_SHARED_SECRET);
   const hasMessagesKv = Boolean(env.MESSAGES);
   const hasChatState = Boolean(env.CHAT_STATE);
+  const hasCustomerUploads = Boolean(env.CUSTOMER_UPLOADS);
+  const hasR2PublicBaseUrl = Boolean(getR2PublicBaseUrl(env));
   const hasAnyMessageStore = hasMessagesKv || hasChatState;
 
   const ok = hasClientId && hasClientSecret && hasIntegrationId && hasAnyMessageStore;
@@ -1491,6 +1582,8 @@ async function handleHealthConfig(env) {
       hasDataActionSharedSecret,
       hasMessagesKv,
       hasChatState,
+      hasCustomerUploads,
+      hasR2PublicBaseUrl,
       messageStore: hasChatState ? 'durable-object' : (hasMessagesKv ? 'kv' : 'none')
     }
   }), {
@@ -1599,8 +1692,12 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   /* Input area */
   .chat-footer { background: #fff; padding: 12px 16px; border-top: 1px solid #e8e8e8; display: flex; align-items: flex-end; gap: 10px; }
+  .composer-wrap { flex: 1; display: flex; flex-direction: column; gap: 8px; }
   #msg { flex: 1; border: 1.5px solid #e0e0e0; border-radius: 24px; padding: 10px 16px; font-size: 14px; resize: none; outline: none; max-height: 100px; line-height: 1.4; transition: border-color 0.2s; font-family: inherit; }
   #msg:focus { border-color: #1a73e8; }
+  .attach-row { display: flex; gap: 6px; align-items: center; }
+  #pdfFile { flex: 1; border: 1px solid #e0e0e0; border-radius: 10px; padding: 8px 10px; font-size: 12px; background: #fff; }
+  .attach-hint { font-size: 11px; color: #667085; }
   .chat-controls { display: flex; flex-direction: column; gap: 8px; align-items: center; }
   #sendBtn { width: 42px; height: 42px; border-radius: 50%; background: #1a73e8; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 0.2s; }
   #sendBtn:hover { background: #1558b0; }
@@ -1635,7 +1732,13 @@ const PAGE_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="chat-footer">
-    <textarea id="msg" rows="1" placeholder="Type a message…" oninput="autoResize(this);handleTypingInput();" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();send();}"></textarea>
+    <div class="composer-wrap">
+      <textarea id="msg" rows="1" placeholder="Type a message…" oninput="autoResize(this);handleTypingInput();" onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();send();}"></textarea>
+      <div class="attach-row">
+        <input id="pdfFile" type="file" accept="application/pdf,.pdf">
+        <span class="attach-hint">PDF max 25 MB</span>
+      </div>
+    </div>
     <div class="chat-controls">
       <button id="sendBtn" onclick="send()" title="Send">
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -1742,11 +1845,54 @@ const PAGE_HTML = `<!DOCTYPE html>
     if (isDisconnected) return;
     const input = document.getElementById('msg');
     const btn = document.getElementById('sendBtn');
+    const pdfFileInput = document.getElementById('pdfFile');
     const text = input.value.trim();
-    if (!text) return;
+    const selectedFile = pdfFileInput.files && pdfFileInput.files[0] ? pdfFileInput.files[0] : null;
+    const attachments = [];
 
-    appendBubble('You', text, 'outgoing');
+    if (selectedFile) {
+      const fileName = selectedFile.name || 'document.pdf';
+      if (!/\.pdf$/i.test(fileName)) {
+        setStatus('Only PDF files are allowed');
+        return;
+      }
+      if (selectedFile.size > 25 * 1024 * 1024) {
+        setStatus('PDF exceeds 25 MB limit');
+        return;
+      }
+    }
+
+    if (!text && !selectedFile) return;
+
+    if (selectedFile) {
+      try {
+        setStatus('Uploading PDF...');
+        const formData = new FormData();
+        formData.append('file', selectedFile, selectedFile.name || 'document.pdf');
+        const uploadRes = await fetch('/upload-pdf', {
+          method: 'POST',
+          body: formData
+        });
+        const uploadBody = await uploadRes.json();
+        if (!uploadRes.ok || !uploadBody || !uploadBody.url) {
+          const reason = uploadBody && uploadBody.error ? uploadBody.error : ('Upload failed (' + uploadRes.status + ')');
+          setStatus(reason);
+          return;
+        }
+        attachments.push({
+          url: uploadBody.url,
+          filename: uploadBody.filename || selectedFile.name || 'document.pdf',
+          contentSizeBytes: uploadBody.contentSizeBytes || selectedFile.size
+        });
+      } catch {
+        setStatus('Upload failed due to network error');
+        return;
+      }
+    }
+
+    appendBubble('You', text || (attachments.length > 0 ? 'PDF document attached' : ''), 'outgoing', null, attachments);
     input.value = ''; input.style.height = 'auto';
+    pdfFileInput.value = '';
     btn.disabled = true;
 
     try {
@@ -1757,7 +1903,12 @@ const PAGE_HTML = `<!DOCTYPE html>
           text,
           visitorId,
           visitorNickname,
-          seedParticipantData: !hasSentCustomerMessage
+          seedParticipantData: !hasSentCustomerMessage,
+          ...(attachments.length > 0 ? {
+            attachmentUrl: attachments[0].url,
+            attachmentFilename: attachments[0].filename,
+            contentSizeBytes: attachments[0].contentSizeBytes
+          } : {})
         })
       });
       if (res.ok) {
@@ -1865,6 +2016,7 @@ async function handleRequest(request, env) {
     const pathname = url.pathname;
 
     if (method === 'POST' && pathname === '/send-to-genesys') return handleSendToGenesys(request, env);
+    if (method === 'POST' && pathname === '/upload-pdf') return handleUploadPdf(request, env);
     if (method === 'POST' && pathname === '/send-typing') return handleSendTypingToGenesys(request, env);
     if (method === 'POST' && pathname === '/disconnect-customer') return handleDisconnectCustomer(request, env);
     if (method === 'POST' && pathname === '/genesys-webhook') return handleGenesysWebhook(request, env);
