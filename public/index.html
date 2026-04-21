@@ -11,15 +11,39 @@
         const socket = io();
         const visitorId = "visitor-" + Math.floor(Math.random() * 1000);
 
+        function escapeHtml(value) {
+            return String(value || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function renderMessage(sender, text, attachments) {
+            const safeText = text ? `<div>${escapeHtml(text)}</div>` : '';
+            const safeAttachments = Array.isArray(attachments) && attachments.length > 0
+                ? `<ul>${attachments.map((attachment) => {
+                    const href = escapeHtml(attachment.url);
+                    const label = escapeHtml(attachment.filename || 'document.pdf');
+                    return `<li><a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a></li>`;
+                }).join('')}</ul>`
+                : '';
+            document.getElementById('chat').innerHTML += `<p><b>${escapeHtml(sender)}:</b> ${safeText}${safeAttachments}</p>`;
+        }
+
         // Receive from Agent
-        socket.on('agent-reply', (text) => {
-            document.getElementById('chat').innerHTML += `<p><b>Agent:</b> ${text}</p>`;
+        socket.on('agent-reply', (message) => {
+            if (typeof message === 'string') {
+                renderMessage('Agent', message, []);
+                return;
+            }
+            renderMessage(message.agentName || 'Agent', message.text, message.attachments || []);
         });
 
         // Send to Middleware
         async function send() {
             const text = document.getElementById('msg').value;
-            document.getElementById('chat').innerHTML += `<p><b>You:</b> ${text}</p>`;
+            renderMessage('You', text, []);
             await fetch('/send-to-genesys', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},

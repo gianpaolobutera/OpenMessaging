@@ -6,6 +6,7 @@ const UI_VERSION = '2026-04-07.4';
 const MIN_KV_TTL_SECONDS = 60;
 const AGENT_TYPING_UI_WINDOW_SECONDS = 10;
 const LAR_THREADING_TTL_SECONDS = 72 * 60 * 60;
+const MAX_PDF_SIZE_BYTES = 25 * 1024 * 1024;
 
 function getGenesysApiUrl(env) {
   return env.GENESYS_API_URL || 'https://api.euc2.pure.cloud';
@@ -25,6 +26,106 @@ function isKvPutLimitError(err) {
 
 function hasMessageStore(env) {
   return Boolean(env && (env.CHAT_STATE || env.MESSAGES));
+}
+
+function normalizeString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function sanitizeFilename(filename, fallback = 'document.pdf') {
+  const trimmed = normalizeString(filename);
+  if (!trimmed) return fallback;
+  return trimmed.toLowerCase().endsWith('.pdf') ? trimmed : `${trimmed}.pdf`;
+}
+
+function normalizePdfAttachment(input, index = 0) {
+  const source = input && typeof input === 'object' ? input : {};
+  const attachment = source.attachment && typeof source.attachment === 'object' ? source.attachment : source;
+  const url = normalizeString(attachment.url || attachment.attachmentUrl || source.attachmentUrl);
+  const mime = normalizeString(attachment.mime || attachment.contentType || source.mime || source.contentType || 'application/pdf').toLowerCase();
+  const filename = sanitizeFilename(attachment.filename || attachment.attachmentFilename || source.filename || source.attachmentFilename || `document-${index + 1}.pdf`);
+  const contentSizeBytes = Number(attachment.contentSizeBytes || attachment.sizeBytes || source.contentSizeBytes || source.sizeBytes || 0);
+  const text = normalizeString(attachment.text || attachment.caption || source.text || source.caption);
+  const sha256 = normalizeString(attachment.sha256 || source.sha256);
+
+  if (!url) {
+    throw new Error(`Attachment ${index + 1} is missing a public HTTPS url`);
+  }
+  if (!/^https:\/\//i.test(url)) {
+    throw new Error(`Attachment ${index + 1} url must use HTTPS`);
+  }
+  if (mime !== 'application/pdf') {
+    throw new Error(`Attachment ${index + 1} must use application/pdf mime type`);
+  }
+  if (Number.isFinite(contentSizeBytes) && contentSizeBytes > MAX_PDF_SIZE_BYTES) {
+    throw new Error(`Attachment ${index + 1} exceeds the 25 MB PDF limit`);
+  }
+
+  return {
+    contentType: 'Attachment',
+    attachment: {
+      mediaType: 'File',
+      url,
+      mime: 'application/pdf',
+      filename,
+      ...(Number.isFinite(contentSizeBytes) && contentSizeBytes > 0 ? { contentSizeBytes } : {}),
+      ...(sha256 ? { sha256 } : {}),
+      ...(text ? { text } : {})
+    }
+  };
+}
+
+function extractInboundPdfAttachments(payload) {
+  const attachments = [];
+
+  if (Array.isArray(payload?.attachments)) attachments.push(...payload.attachments);
+  if (payload?.attachment) attachments.push(payload.attachment);
+  if (payload?.attachmentUrl || payload?.attachmentFilename) {
+    attachments.push({
+      url: payload.attachmentUrl,
+      filename: payload.attachmentFilename,
+      contentSizeBytes: payload.contentSizeBytes,
+      sha256: payload.sha256,
+      text: payload.attachmentText
+    });
+  }
+  if (Array.isArray(payload?.content)) attachments.push(...payload.content);
+
+  return attachments.map((entry, index) => normalizePdfAttachment(entry, index));
+}
+
+function extractWebhookPdfAttachments(payload) {
+  const buckets = [
+    payload?.content,
+    payload?.event?.content,
+    payload?.body?.content,
+    payload?.message?.content,
+    payload?.event?.message?.content,
+    payload?.body?.message?.content,
+    payload?.body?.event?.content,
+    payload?.body?.event?.message?.content
+  ];
+
+  const attachments = [];
+  for (const bucket of buckets) {
+    if (!Array.isArray(bucket)) continue;
+    for (const item of bucket) {
+      try {
+        const normalized = normalizePdfAttachment(item, attachments.length);
+        attachments.push({
+          url: normalized.attachment.url,
+          filename: normalized.attachment.filename,
+          mime: normalized.attachment.mime,
+          contentSizeBytes: normalized.attachment.contentSizeBytes,
+          sha256: normalized.attachment.sha256,
+          text: normalized.attachment.text
+        });
+      } catch {
+      }
+    }
+  }
+
+  return attachments;
 }
 
 function getChatStateStub(env) {
@@ -182,7 +283,7 @@ function extractAgentDisplayName(payload) {
   return 'Agent';
 }
 
-async function appendReplyWithName(env, visitorId, text, agentName) {
+async function appendReplyWithName(env, visitorId, text, agentName, attachments = []) {
   const existing = await kvGet(env, visitorId);
   let msgs = [];
   if (existing) {
@@ -196,7 +297,8 @@ async function appendReplyWithName(env, visitorId, text, agentName) {
   msgs.push({
     text,
     timestamp: new Date().toISOString(),
-    agentName: agentName || 'Agent'
+    agentName: agentName || 'Agent',
+    attachments: Array.isArray(attachments) ? attachments : []
   });
   await safeKvPut(env, visitorId, JSON.stringify(msgs), { expirationTtl: 3600 });
 }
@@ -817,8 +919,10 @@ async function handleSendToGenesys(request, env) {
           seedParticipantData,
           participantAttributes
         } = body;
-    if (!text || !visitorId) {
-      return new Response('Missing required fields: text, visitorId', { status: 400 });
+    const attachments = extractInboundPdfAttachments(body || {});
+    const normalizedText = normalizeString(text);
+    if (!visitorId || (!normalizedText && attachments.length === 0)) {
+      return new Response('Missing required fields: visitorId and text or PDF attachment', { status: 400 });
     }
 
         if (!env.INTEGRATION_ID) {
@@ -876,7 +980,8 @@ async function handleSendToGenesys(request, env) {
                 }
             },
             direction: 'Inbound',
-            text
+            text: normalizedText || (attachments.length === 1 ? 'PDF document attached' : 'PDF documents attached'),
+            ...(attachments.length > 0 ? { content: attachments } : {})
         };
 
         let payloadVariants = [
@@ -1105,10 +1210,11 @@ async function handleGenesysWebhook(request, env) {
         const msgType = (body.type || body.event?.type || body.body?.type || '').toString().toLowerCase();
         const eventType = (body.event?.eventType || body.eventType || body.body?.event?.eventType || '').toString().toLowerCase();
         const { text, textPath } = extractWebhookText(body);
+        const attachments = extractWebhookPdfAttachments(body);
         const typingState = extractTypingState(body);
         const typingDurationMs = extractTypingDurationMs(body);
         const typingEvent = matchesTypingEvent(body);
-        const textLikeEvent = msgType === 'text' || eventType === 'message' || Boolean(text);
+        const textLikeEvent = msgType === 'text' || eventType === 'message' || Boolean(text) || attachments.length > 0;
         const outboundLike = direction === 'Outbound' || textLikeEvent || typingEvent;
         const candidateCount = collectCandidateVisitorIds(body).length;
         const typingRaw =
@@ -1135,6 +1241,7 @@ async function handleGenesysWebhook(request, env) {
             eventType,
             outboundLike,
             hasText: Boolean(text),
+            attachmentCount: attachments.length,
             textPath,
             bodyKeys: Object.keys(body || {}),
             typingRaw,
@@ -1151,6 +1258,7 @@ async function handleGenesysWebhook(request, env) {
               msgType,
               eventType,
               hasText: Boolean(text),
+              attachmentCount: attachments.length,
               textPath,
               candidateCount,
               typingDurationMs,
@@ -1167,6 +1275,7 @@ async function handleGenesysWebhook(request, env) {
               msgType,
               eventType,
               text,
+              attachmentCount: attachments.length,
               textPath,
               candidateCount
             }), { expirationTtl: 3600 });
@@ -1195,7 +1304,7 @@ async function handleGenesysWebhook(request, env) {
             }
         }
 
-        if (outboundLike && text) {
+        if (outboundLike && (text || attachments.length > 0)) {
             if (!hasMessageStore(env)) {
               return new Response('Missing message store binding: MESSAGES or CHAT_STATE', { status: 500 });
             }
@@ -1221,7 +1330,7 @@ async function handleGenesysWebhook(request, env) {
               for (const visitorId of candidates) {
                 try {
                   await setTypingState(env, visitorId, false, 'agent', 60);
-                  await appendReplyWithName(env, visitorId, text, agentName);
+                  await appendReplyWithName(env, visitorId, normalizeString(text), agentName, attachments);
                   appendResult.appended.push(visitorId);
                 } catch (e) {
                   appendResult.failed.push({ visitorId, error: e.message });
@@ -1271,6 +1380,7 @@ async function handleGenesysWebhook(request, env) {
           eventType,
           outboundLike,
           hasText: Boolean(text),
+          attachmentCount: attachments.length,
           textPath,
           bodyKeys: Object.keys(body || {}),
           typingRaw,
@@ -1579,10 +1689,18 @@ const PAGE_HTML = `<!DOCTYPE html>
     row.className = 'msg-row ' + type;
     const avatarLabel = isOut ? 'Me' : 'AG';
     const avatarClass = isOut ? 'you-avatar' : '';
+    const attachments = arguments.length > 4 && Array.isArray(arguments[4]) ? arguments[4] : [];
+    const attachmentMarkup = attachments.length > 0
+      ? '<div style="margin-top:8px; display:flex; flex-direction:column; gap:6px;">' + attachments.map((attachment) => {
+          const href = escapeHtml(attachment.url || '#');
+          const label = escapeHtml(attachment.filename || 'document.pdf');
+          return '<a href="' + href + '" target="_blank" rel="noopener noreferrer" style="color:' + (isOut ? '#fff' : '#1a73e8') + '; text-decoration:underline;">' + label + '</a>';
+        }).join('') + '</div>'
+      : '';
     row.innerHTML =
       '<div class="msg-avatar ' + avatarClass + '">' + avatarLabel + '</div>' +
       '<div>' +
-        '<div class="bubble">' + escapeHtml(text) + '</div>' +
+        '<div class="bubble">' + (text ? escapeHtml(text) : '') + attachmentMarkup + '</div>' +
         '<div class="bubble-meta">' + (isOut ? 'You' : sender) + ' · ' + formatTime(timestamp) + '</div>' +
       '</div>';
     chat.appendChild(row);
@@ -1728,7 +1846,7 @@ const PAGE_HTML = `<!DOCTYPE html>
       }
       if (data.messages && data.messages.length > 0) {
         removeTyping();
-        data.messages.forEach(m => appendBubble(m.agentName || 'Agent', m.text, 'incoming', m.timestamp));
+        data.messages.forEach(m => appendBubble(m.agentName || 'Agent', m.text, 'incoming', m.timestamp, m.attachments || []));
         seenCount = data.total;
         setStatus('Agent replied · ' + formatTime());
       }
