@@ -17,8 +17,7 @@ new_sqlite_classes = ["ChatStateStore"]
 GENESYS_REGION = "euc2"
 GENESYS_API_URL = "https://api.euc2.pure.cloud"
 # Public base URL for uploaded customer PDFs (R2 public domain or custom domain)
-# Example: "https://pub-xxxxxxxxxxxxxxxx.r2.dev"
-R2_PUBLIC_BASE_URL = "https://1fa3a79364c9aec51973d207ee37f801.r2.cloudflarestorage.com/openmessage"
+R2_PUBLIC_BASE_URL = "https://pub-6541275f00c544ce8ce63d4964f5d86b.r2.dev"
 
 # Explicit production environment so `wrangler deploy --env production`
 # keeps the same non-secret runtime values as the default environment.
@@ -32,7 +31,7 @@ bindings = [
 [env.production.vars]
 GENESYS_REGION = "euc2"
 GENESYS_API_URL = "https://api.euc2.pure.cloud"
-R2_PUBLIC_BASE_URL = "https://1fa3a79364c9aec51973d207ee37f801.r2.cloudflarestorage.com/openmessage"
+R2_PUBLIC_BASE_URL = "https://pub-6541275f00c544ce8ce63d4964f5d86b.r2.dev"
 
 # R2 binding for customer-side PDF upload endpoint (/upload-pdf)
 [[r2_buckets]]
