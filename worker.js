@@ -1486,17 +1486,26 @@ async function handleDebugWebhook(env) {
 async function handleGetMessages(request, env) {
     const url = new URL(request.url);
     const visitorId = url.searchParams.get('visitorId');
-    const after = parseInt(url.searchParams.get('after') || '0');
+    const afterRaw = Number.parseInt(url.searchParams.get('after') || '0', 10);
 
     if (!visitorId) return new Response('Missing visitorId', { status: 400 });
   if (!hasMessageStore(env)) return new Response('Missing message store binding: MESSAGES or CHAT_STATE', { status: 500 });
 
   const existing = await kvGet(env, visitorId);
     const msgs = existing ? JSON.parse(existing) : [];
-    const newMsgs = msgs.slice(after);
+    const requestedAfter = Number.isFinite(afterRaw) && afterRaw >= 0 ? afterRaw : 0;
+    const cursorReset = requestedAfter > msgs.length;
+    const effectiveAfter = cursorReset ? 0 : requestedAfter;
+    const newMsgs = msgs.slice(effectiveAfter);
     const typing = await getTypingState(env, visitorId);
 
-    return new Response(JSON.stringify({ messages: newMsgs, total: msgs.length, typing }), {
+    return new Response(JSON.stringify({
+      messages: newMsgs,
+      total: msgs.length,
+      typing,
+      cursorReset,
+      effectiveAfter
+    }), {
         headers: { 'Content-Type': 'application/json' }
     });
 }
@@ -1987,6 +1996,10 @@ const PAGE_HTML = `<!DOCTYPE html>
       const res = await fetch('/get-messages?visitorId=' + visitorId + '&after=' + seenCount);
       if (!res.ok) return;
       const data = await res.json();
+      if (data && data.cursorReset) {
+        // Recover from message-store TTL/reset where client cursor is beyond current history.
+        seenCount = Number.isFinite(data.effectiveAfter) ? data.effectiveAfter : 0;
+      }
       if (!connected) { connected = true; setStatus('Connected · Visitor ID: ' + visitorId + ' · UI ${UI_VERSION}'); }
       if (data.typing && data.typing.isTyping && data.typing.source === 'agent') {
         showTyping();
@@ -2000,11 +2013,15 @@ const PAGE_HTML = `<!DOCTYPE html>
         data.messages.forEach(m => appendBubble(m.agentName || 'Agent', m.text, 'incoming', m.timestamp, m.attachments || []));
         seenCount = data.total;
         setStatus('Agent replied · ' + formatTime());
+      } else if (Number.isFinite(data.total) && data.total < seenCount) {
+        // Safety net for older responses or mixed-version clients.
+        seenCount = data.total;
       }
     } catch (e) { setStatus('Polling error — retrying…'); }
   }
 
-  setInterval(pollReplies, 8000);
+  pollReplies();
+  setInterval(pollReplies, 3000);
   setTimeout(() => { if (!connected) setStatus('Ready · Visitor ID: ' + visitorId + ' · UI ${UI_VERSION}'); }, 2000);
 </script>
 </body>
